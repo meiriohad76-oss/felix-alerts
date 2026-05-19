@@ -1,0 +1,22 @@
+[Unit]
+Description=Sentinel Portfolio Monitor
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sentinel
+Group=sentinel
+WorkingDirectory=/opt/sentinel
+EnvironmentFile=/etc/sentinel/sentinel.env
+ExecStart=/opt/sentinel/.venv/bin/python /opt/sentinel/scripts/run_dev_server.py --host ${HOST} --port ${PORT} --db-path ${SENTINEL_DB_PATH} --static-dir ${SENTINEL_STATIC_DIR}
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/sentinel /var/log/sentinel
+
+[Install]
+WantedBy=multi-user.target

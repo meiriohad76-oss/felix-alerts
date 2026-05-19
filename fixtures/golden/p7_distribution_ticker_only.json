@@ -1,0 +1,15 @@
+{
+  "name": "p7_distribution_ticker_only",
+  "ticker": {
+    "ticker": "AAPL",
+    "type": "unknown"
+  },
+  "bars": {
+    "pattern": "p7_distribution_day"
+  },
+  "asof": "2025-02-20",
+  "expected": {
+    "rule_ids": ["C1", "T1", "P7"],
+    "ticket_actions": []
+  }
+}

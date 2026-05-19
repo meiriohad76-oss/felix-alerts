@@ -1,0 +1,43 @@
+# Local runtime data
+sentinel_dev.sqlite3
+*.sqlite3
+*.db
+*.db-shm
+*.db-wal
+*.log
+*.pid
+
+# Secrets and local environment
+.env
+.env.*
+!.env.example
+deploy/**/env
+deploy/**/*.local
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+
+# Node/browser test output
+node_modules/
+playwright-report/
+test-results/
+.cache/
+
+# OS/editor metadata
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Temporary/generated artifacts
+tmp/
+dist/
+build/
+coverage/
+.superpowers/

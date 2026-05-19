@@ -1,0 +1,7 @@
+tunnel: sentinel
+credentials-file: /etc/cloudflared/sentinel.json
+
+ingress:
+  - hostname: sentinel.example.com
+    service: http://127.0.0.1:8765
+  - service: http_status:404

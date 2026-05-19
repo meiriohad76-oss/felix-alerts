@@ -1,0 +1,14 @@
+[Unit]
+Description=Cloudflare Tunnel for Sentinel
+After=network-online.target sentinel.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/cloudflared tunnel --config /etc/cloudflared/config.yml run
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

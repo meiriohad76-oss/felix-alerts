@@ -1,0 +1,17 @@
+{
+  "name": "index_exemption",
+  "ticker": {
+    "ticker": "VOO",
+    "type": "index",
+    "shares": "40",
+    "entry_price": "438.10"
+  },
+  "bars": {
+    "pattern": "p1_cross_below_sma150"
+  },
+  "asof": "2025-05-31",
+  "expected": {
+    "rule_ids": [],
+    "ticket_actions": []
+  }
+}
