@@ -43,6 +43,11 @@ Recommended target:
 - Database path: `/var/lib/sentinel/sentinel.sqlite3`.
 - Environment file: `/etc/sentinel/sentinel.env`.
 - Service user: `sentinel`.
+- Bind address: `HOST=127.0.0.1`.
+
+Do not expose port 8765 directly on the LAN. Cloudflare Tunnel should connect
+to the local service at `127.0.0.1:8765`; Cloudflare Access is the external
+access control layer.
 
 ### Install
 
@@ -79,6 +84,7 @@ The expected health response is:
 Use `deploy/raspberry-pi/env.example` as the template. Required for market data:
 
 ```bash
+HOST=127.0.0.1
 MASSIVE_API_KEY=...
 ```
 

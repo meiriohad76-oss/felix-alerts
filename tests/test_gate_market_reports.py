@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import date
+from unittest.mock import patch
 
 from sentinel_core.gate import classify_ticker, validate_new_position
 from sentinel_core.market_data import (
@@ -117,6 +118,18 @@ class MarketDataTests(unittest.TestCase):
         self.assertTrue(provider.validate_symbol("AAPL"))
         self.assertTrue(provider.validate_symbol("BRK.B"))
         self.assertFalse(provider.validate_symbol("bad symbol"))
+
+    def test_massive_provider_keeps_api_key_out_of_url(self):
+        provider = MassiveMarketDataProvider(api_key="secret-token")
+        payload = {"status": "OK", "results": []}
+
+        with patch("sentinel_core.market_data._load_massive_json", return_value=payload) as load:
+            provider.get_bars("AAPL", end=date(2025, 5, 31), lookback=5)
+
+        url, api_key, _timeout = load.call_args.args
+        self.assertEqual(api_key, "secret-token")
+        self.assertNotIn("secret-token", url)
+        self.assertNotIn("apiKey=", url)
 
     def test_massive_aggregates_payload_parser(self):
         payload = {

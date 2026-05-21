@@ -27,6 +27,9 @@ class FrontendSidebarStaticTests(unittest.TestCase):
         html = self.read_sidebar()
         self.assertIn("<title>Sentinel Portfolio Monitor</title>", html)
         self.assertIn("SENTINEL", html)
+        self.assertNotIn("sentinel.massiveApiKey", html)
+        self.assertNotIn("localStorage.setItem(STORAGE_KEYS.massiveApiKey", html)
+        self.assertNotIn("body.api_key", html)
 
     def test_sidebar_defines_approved_display_routes(self):
         html = self.read_sidebar()
@@ -274,13 +277,13 @@ class FrontendSidebarStaticTests(unittest.TestCase):
         self.assertIn("ticker(s) have stored market data", html)
         self.assertIn("Missing bars:", html)
         self.assertIn("Latest data attempt:", html)
-        self.assertIn("Massive key was not active for that run", html)
+        self.assertIn("Server Massive key is not active; configure it and run the monitor again.", html)
 
     def test_primary_monitor_requires_massive_instead_of_silent_fallback(self):
         html = self.read_sidebar()
         self.assertIn("Massive key required", html)
         self.assertIn("Save Portfolio & Run Monitor requires Massive", html)
-        self.assertIn("Massive key is missing. Paste the key before running the monitor.", html)
+        self.assertIn("Massive key is missing on the server. Configure MASSIVE_API_KEY before running the monitor.", html)
         self.assertNotIn("No Massive key saved. Trying the online fallback", html)
         self.assertNotIn("No Massive key found; trying online fallback bars", html)
 

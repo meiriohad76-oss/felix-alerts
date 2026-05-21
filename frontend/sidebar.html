@@ -4665,7 +4665,7 @@
                       </div>
                       <div>
                         <label for="massiveApiKey">Massive API key</label>
-                        <input id="massiveApiKey" type="password" autocomplete="off" placeholder="Paste once for real bars" />
+                        <input id="massiveApiKey" type="password" autocomplete="off" placeholder="Configured on server" disabled />
                       </div>
                     </div>
                     <div class="field-actions">
@@ -4682,7 +4682,7 @@
                   </div>
                   <div class="csv-status">
                     <strong id="massiveKeyStatus">Massive key missing</strong>
-                    <span id="massiveKeyDetail" class="muted">Paste your key once. It stays in this browser and is sent only to the Sentinel server.</span>
+                    <span id="massiveKeyDetail" class="muted">Massive keys are read from the server environment and are not stored in this browser.</span>
                   </div>
                 </div>
               </div>
@@ -4876,7 +4876,6 @@
       };
 
       const STORAGE_KEYS = {
-        massiveApiKey: "sentinel.massiveApiKey",
         runReceipts: "sentinel.runReceipts",
         activePortfolioId: "sentinel.activePortfolioId"
       };
@@ -5446,23 +5445,11 @@
       }
 
       function storedMassiveKey() {
-        try {
-          return window.localStorage.getItem(STORAGE_KEYS.massiveApiKey) || "";
-        } catch (error) {
-          return "";
-        }
+        return "";
       }
 
       function saveMassiveKey(value) {
-        try {
-          if (value) {
-            window.localStorage.setItem(STORAGE_KEYS.massiveApiKey, value);
-          } else {
-            window.localStorage.removeItem(STORAGE_KEYS.massiveApiKey);
-          }
-        } catch (error) {
-          log("Browser storage is unavailable; the Massive key will be used for this page session only.");
-        }
+        return "";
       }
 
       function hydrateMassiveKeyField() {
@@ -5470,14 +5457,15 @@
         if (!input) {
           return;
         }
-        const saved = storedMassiveKey();
-        if (saved && !input.value) {
-          input.value = saved;
-        }
+        input.value = "";
+        input.disabled = true;
+        input.placeholder = serverMassiveConfigured()
+          ? "Configured on server"
+          : "Set MASSIVE_API_KEY on server";
       }
 
       function massiveApiKey() {
-        return ($("massiveApiKey")?.value || storedMassiveKey()).trim();
+        return "";
       }
 
       function serverMassiveConfigured() {
@@ -5485,7 +5473,7 @@
       }
 
       function massiveReady() {
-        return Boolean(massiveApiKey()) || serverMassiveConfigured();
+        return serverMassiveConfigured();
       }
 
       function loadActivePortfolioId() {
@@ -5768,18 +5756,13 @@
       }
 
       function updateMassiveKeyStatus() {
-        const browserKeyReady = Boolean(massiveApiKey());
         if (serverMassiveConfigured()) {
           $("massiveKeyStatus").textContent = "Massive key configured on server";
-          $("massiveKeyDetail").textContent = browserKeyReady
-            ? "Server-side Massive key is configured. The browser key can override it for this run."
-            : "Server-side Massive key is configured. Import & Run Monitor can load Massive data without pasting a browser key.";
+          $("massiveKeyDetail").textContent = "Server-side Massive key is configured. Import & Run Monitor can load Massive data without exposing the key to the browser.";
           return;
         }
-        $("massiveKeyStatus").textContent = browserKeyReady ? "Massive key ready" : "Massive key missing";
-        $("massiveKeyDetail").textContent = browserKeyReady
-          ? "Import & Run Monitor will require a successful Massive pull before evaluation."
-          : "Massive key required. Paste your key before running the monitor. The online fallback is only an advanced manual option.";
+        $("massiveKeyStatus").textContent = "Server Massive key missing";
+        $("massiveKeyDetail").textContent = "Configure MASSIVE_API_KEY on the server before running the monitor. The online fallback is only an advanced manual option.";
       }
 
       function updateCsvStatus() {
@@ -5830,11 +5813,11 @@
           $("marketDataLabel").textContent = "No saved market data loaded";
           $("marketDataDetail").textContent = massiveReady()
             ? "Import & Run Monitor will backfill Massive bars, then evaluate only after that succeeds."
-            : "Paste a Massive key before running the monitor. Save Portfolio & Run Monitor requires Massive data.";
+            : "Configure the server Massive key before running the monitor. Save Portfolio & Run Monitor requires Massive data.";
         } else if (dataTickers < savedTickers) {
           const keyText = massiveReady()
             ? "Run the monitor again with the active Massive key to fill missing symbols."
-            : "Massive key was not active for that run; paste the key and run the monitor again.";
+            : "Server Massive key is not active; configure it and run the monitor again.";
           const failureText = failedAttempts.length
             ? ` ${failedAttempts.length} ticker(s) have a failed latest attempt.`
             : "";
@@ -6239,7 +6222,7 @@
         } else if (!state.portfolioId) {
           setNextAction("working", "Import & Run Monitor", "This will create the portfolio, load market data, evaluate, and open the chart.");
         } else if (csv.rowCount && (!importIsCurrent || sourceNeedsSave)) {
-          setNextAction("working", "Import & Run Monitor", massiveReady() ? "This will import tickers, load Massive bars, evaluate, and open a chart." : "Save Portfolio & Run Monitor requires Massive. Paste the key before running.");
+          setNextAction("working", "Import & Run Monitor", massiveReady() ? "This will import tickers, load Massive bars, evaluate, and open a chart." : "Save Portfolio & Run Monitor requires Massive. Configure the server key before running.");
         } else if (!savedTickerCount) {
           if (!csv.rowCount) {
             setNextAction("blocked", "Load a portfolio file", "Choose CSV, TSV, XLSX, or XLSM, or paste CSV rows into the editor.");
@@ -9406,7 +9389,7 @@
           return;
         }
         if (!massiveReady()) {
-          const message = "Massive key is missing. Paste the key before retrying failed symbols.";
+          const message = "Massive key is missing on the server. Configure MASSIVE_API_KEY before retrying failed symbols.";
           setRunStatus("error", "Massive key required", message);
           log(message);
           return;
@@ -9708,12 +9691,7 @@
 
       async function backfillMassiveForPortfolio({ failedOnly = false } = {}) {
         requirePortfolio();
-        const body = { end: $("asofDate").value || todayIso(), lookback: 250, ...(failedOnly ? { failed_only: true } : {}) };
-        const apiKey = massiveApiKey();
-        if (apiKey) {
-          body.api_key = apiKey;
-          body.timeout_seconds = 8;
-        }
+        const body = { end: $("asofDate").value || todayIso(), lookback: 250, timeout_seconds: 8, ...(failedOnly ? { failed_only: true } : {}) };
         setRunStatus("working", failedOnly ? "Retrying failed Massive bars" : "Loading Massive bars", failedOnly ? "Only symbols with a failed Massive attempt will be retried." : "Fetching real daily bars. This can take a moment on large portfolios.");
         const payload = await api(`/portfolios/${state.portfolioId}/backfill-massive`, {
           method: "POST",
@@ -9761,7 +9739,7 @@
 
       async function loadPrimaryMarketDataForPortfolio() {
         if (!massiveReady()) {
-          const message = "Massive key is missing. Paste the key before running the monitor.";
+          const message = "Massive key is missing on the server. Configure MASSIVE_API_KEY before running the monitor.";
           log(message);
           setRunStatus("error", "Massive key required", "Save Portfolio & Run Monitor requires Massive data. Online fallback is available only from Advanced manual controls.");
           throw new Error(message);
@@ -10207,7 +10185,7 @@
       });
 
       $("massiveApiKey").addEventListener("input", () => {
-        saveMassiveKey($("massiveApiKey").value.trim());
+        $("massiveApiKey").value = "";
         updateMassiveKeyStatus();
         updateMarketDataStatus();
         renderNextAction();
@@ -10215,11 +10193,10 @@
 
       $("clearMassiveKey").addEventListener("click", () => {
         $("massiveApiKey").value = "";
-        saveMassiveKey("");
         updateMassiveKeyStatus();
         updateMarketDataStatus();
         renderNextAction();
-        log("Massive key cleared from this browser.");
+        log("Massive keys are configured on the server, not stored in this browser.");
       });
 
       hydrateMassiveKeyField();

@@ -83,7 +83,6 @@ class MassiveMarketDataProvider:
                 "adjusted": str(self.adjusted).lower(),
                 "sort": "asc",
                 "limit": "50000",
-                "apiKey": self.api_key,
             }
         )
         url = (

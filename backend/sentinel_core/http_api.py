@@ -35,6 +35,8 @@ from .xlsx_import import xlsx_bytes_to_sentinel_csv
 
 
 DEFAULT_USER_ID = UUID("00000000-0000-4000-8000-000000000001")
+DEFAULT_MAX_JSON_BODY_BYTES = 2 * 1024 * 1024
+VALID_ACK_KINDS = {"placed", "placed_with_modification", "ignored"}
 _PROXY_CACHE_READY = False
 _PROXY_CACHE_VALUE: Optional[str] = None
 
@@ -61,6 +63,49 @@ def _parse_positive_finite_decimal(value, field_name: str) -> Decimal:
         )
     if parsed <= 0:
         raise ApiError(HTTPStatus.BAD_REQUEST, "%s must be greater than zero" % field_name)
+    return parsed
+
+
+def _configured_max_json_body_bytes() -> int:
+    raw = os.environ.get("SENTINEL_MAX_JSON_BODY_BYTES", "").strip()
+    if not raw:
+        return DEFAULT_MAX_JSON_BODY_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_MAX_JSON_BODY_BYTES
+    return value if value > 0 else DEFAULT_MAX_JSON_BODY_BYTES
+
+
+def _configured_cors_origin() -> str:
+    origin = os.environ.get("SENTINEL_ALLOWED_ORIGIN", "").strip()
+    return "" if origin == "*" else origin
+
+
+def _parse_iso_date(value, field_name: str) -> date:
+    try:
+        return date.fromisoformat(value or date.today().isoformat())
+    except (TypeError, ValueError) as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "%s must be YYYY-MM-DD" % field_name) from exc
+
+
+def _parse_limited_int(
+    value,
+    field_name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        parsed = int(value if value is not None else default)
+    except (TypeError, ValueError) as exc:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "%s must be an integer" % field_name) from exc
+    if parsed < minimum or parsed > maximum:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "%s must be between %s and %s" % (field_name, minimum, maximum),
+        )
     return parsed
 
 
@@ -570,9 +615,9 @@ class SentinelApi:
         except KeyError as exc:
             raise ApiError(HTTPStatus.NOT_FOUND, str(exc)) from exc
         try:
-            asof = date.fromisoformat(body.get("asof", date.today().isoformat()))
-        except ValueError as exc:
-            raise ApiError(HTTPStatus.BAD_REQUEST, "asof must be YYYY-MM-DD") from exc
+            asof = _parse_iso_date(body.get("asof"), "asof")
+        except ApiError:
+            raise
         self.workspace.evaluate_portfolio(portfolio_id=portfolio_id, asof=asof)
         return {
             "ticker": updated,
@@ -596,11 +641,17 @@ class SentinelApi:
         }
 
     def backfill_online(self, portfolio_id: UUID, body: dict) -> dict:
-        end = date.fromisoformat(body.get("end", date.today().isoformat()))
-        lookback = int(body.get("lookback", 250))
+        end = _parse_iso_date(body.get("end"), "end")
+        lookback = _parse_limited_int(body.get("lookback"), "lookback", default=250, minimum=1, maximum=1000)
         provider = YahooChartMarketDataProvider(
             range_value=body.get("range", "2y"),
-            timeout_seconds=int(body.get("timeout_seconds", 10)),
+            timeout_seconds=_parse_limited_int(
+                body.get("timeout_seconds"),
+                "timeout_seconds",
+                default=10,
+                minimum=1,
+                maximum=60,
+            ),
             proxy_url=_detect_proxy_url(),
         )
         tickers = self.workspace.store.list_tickers(portfolio_id, include_inactive=False)
@@ -665,18 +716,24 @@ class SentinelApi:
         return {"updated": tuple(updated), "failed": tuple(failed), "source": "online-yahoo-chart"}
 
     def backfill_massive(self, portfolio_id: UUID, body: dict) -> dict:
-        api_key = (body.get("api_key") or os.environ.get("MASSIVE_API_KEY", "")).strip()
+        api_key = os.environ.get("MASSIVE_API_KEY", "").strip()
         if not api_key:
             raise ApiError(
                 HTTPStatus.BAD_REQUEST,
-                "Massive API key is not set. Paste it in the app or start the dev server with MASSIVE_API_KEY.",
+                "Massive API key is not configured on the server. Set MASSIVE_API_KEY before running Massive backfill.",
             )
 
-        end = date.fromisoformat(body.get("end", date.today().isoformat()))
-        lookback = int(body.get("lookback", 250))
+        end = _parse_iso_date(body.get("end"), "end")
+        lookback = _parse_limited_int(body.get("lookback"), "lookback", default=250, minimum=1, maximum=1000)
         provider = MassiveMarketDataProvider(
             api_key=api_key,
-            timeout_seconds=int(body.get("timeout_seconds", 15)),
+            timeout_seconds=_parse_limited_int(
+                body.get("timeout_seconds"),
+                "timeout_seconds",
+                default=15,
+                minimum=1,
+                maximum=60,
+            ),
             proxy_url=_detect_proxy_url(),
         )
         all_tickers = self.workspace.store.list_tickers(portfolio_id, include_inactive=False)
@@ -768,7 +825,7 @@ class SentinelApi:
         }
 
     def evaluate(self, portfolio_id: UUID, body: dict) -> dict:
-        asof = date.fromisoformat(body.get("asof", date.today().isoformat()))
+        asof = _parse_iso_date(body.get("asof"), "asof")
         alerts = self.workspace.evaluate_portfolio(portfolio_id=portfolio_id, asof=asof)
         run = self.workspace.store.latest_monitor_run(portfolio_id)
         notifications = [
@@ -782,12 +839,22 @@ class SentinelApi:
         ack_kind = body.get("ack_kind")
         if not ack_kind:
             raise ApiError(HTTPStatus.BAD_REQUEST, "ack_kind is required")
-        alert = self.workspace.acknowledge_alert(
-            portfolio_id=portfolio_id,
-            alert_id=alert_id,
-            ack_kind=ack_kind,
-            note=body.get("note", ""),
-        )
+        if ack_kind not in VALID_ACK_KINDS:
+            raise ApiError(
+                HTTPStatus.BAD_REQUEST,
+                "ack_kind must be placed, placed_with_modification, or ignored",
+            )
+        try:
+            alert = self.workspace.acknowledge_alert(
+                portfolio_id=portfolio_id,
+                alert_id=alert_id,
+                ack_kind=ack_kind,
+                note=body.get("note", ""),
+            )
+        except ValueError as exc:
+            raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
+        except KeyError as exc:
+            raise ApiError(HTTPStatus.NOT_FOUND, str(exc)) from exc
         return {"alert": alert}
 
 
@@ -1416,23 +1483,50 @@ def make_handler(api: SentinelApi, static_dir: Optional[Path] = None):
             return candidate if candidate.is_file() else None
 
         def _read_json_body(self) -> dict:
-            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError as exc:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "Content-Length must be an integer") from exc
             if length == 0:
                 return {}
-            raw = self.rfile.read(length).decode("utf-8")
+            max_length = _configured_max_json_body_bytes()
+            if length > max_length:
+                raise ApiError(
+                    HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                    "request body is too large; limit is %s bytes" % max_length,
+                )
+            try:
+                raw = self.rfile.read(length).decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be UTF-8 JSON") from exc
             if not raw:
                 return {}
-            return json.loads(raw)
+            try:
+                payload = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be valid JSON") from exc
+            if not isinstance(payload, dict):
+                raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be a JSON object")
+            return payload
+
+        def _write_response_body(self, raw: bytes) -> None:
+            chunk_size = 16 * 1024
+            for offset in range(0, len(raw), chunk_size):
+                self.wfile.write(raw[offset : offset + chunk_size])
+            self.wfile.flush()
 
         def _send_json(self, status: HTTPStatus, payload: dict) -> None:
             raw = json.dumps(to_jsonable(payload), indent=2, sort_keys=True).encode("utf-8")
             self.send_response(status.value)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
-            self.send_header("Access-Control-Allow-Origin", "*")
+            cors_origin = _configured_cors_origin()
+            if cors_origin:
+                self.send_header("Access-Control-Allow-Origin", cors_origin)
+                self.send_header("Vary", "Origin")
             self.end_headers()
             if self.command != "HEAD":
-                self.wfile.write(raw)
+                self._write_response_body(raw)
 
         def _send_static(self, path: Path) -> None:
             if not path.exists():
@@ -1447,7 +1541,7 @@ def make_handler(api: SentinelApi, static_dir: Optional[Path] = None):
             self.send_header("Expires", "0")
             self.end_headers()
             if self.command != "HEAD":
-                self.wfile.write(raw)
+                self._write_response_body(raw)
 
     Handler.api = api
     return Handler
@@ -1456,11 +1550,11 @@ def make_handler(api: SentinelApi, static_dir: Optional[Path] = None):
 class SentinelHTTPServer(ThreadingHTTPServer):
     def server_close(self) -> None:
         try:
+            super().server_close()
+        finally:
             api = getattr(self.RequestHandlerClass, "api", None)
             if api is not None:
                 api.workspace.store.close()
-        finally:
-            super().server_close()
 
 
 def create_server(

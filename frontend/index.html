@@ -3938,7 +3938,7 @@
                 </div>
                 <div>
                   <label for="massiveApiKey">Massive API Key</label>
-                  <input id="massiveApiKey" type="password" autocomplete="off" placeholder="Paste once for real bars" />
+                  <input id="massiveApiKey" type="password" autocomplete="off" placeholder="Configured on server" disabled />
                 </div>
               </div>
               <div class="field-actions">
@@ -3960,7 +3960,7 @@
                 </div>
                 <div class="csv-status">
                   <strong id="massiveKeyStatus">Massive key missing</strong>
-                  <span id="massiveKeyDetail" class="muted">Paste your key once. It stays in this browser and is sent only to the Sentinel server.</span>
+                  <span id="massiveKeyDetail" class="muted">Massive keys are read from the server environment and are not stored in this browser.</span>
                 </div>
               </div>
             </div>
@@ -4099,11 +4099,11 @@
         runInProgress: false,
         pageMode: INITIAL_ROUTE.pageMode,
         routePortfolioId: INITIAL_ROUTE.portfolioId,
-        routeTicker: INITIAL_ROUTE.ticker
+        routeTicker: INITIAL_ROUTE.ticker,
+        marketDataConfig: { massive_configured: false, massive_key_source: "unknown" }
       };
 
       const STORAGE_KEYS = {
-        massiveApiKey: "sentinel.massiveApiKey",
         runReceipts: "sentinel.runReceipts"
       };
 
@@ -4468,23 +4468,11 @@
       }
 
       function storedMassiveKey() {
-        try {
-          return window.localStorage.getItem(STORAGE_KEYS.massiveApiKey) || "";
-        } catch (error) {
-          return "";
-        }
+        return "";
       }
 
       function saveMassiveKey(value) {
-        try {
-          if (value) {
-            window.localStorage.setItem(STORAGE_KEYS.massiveApiKey, value);
-          } else {
-            window.localStorage.removeItem(STORAGE_KEYS.massiveApiKey);
-          }
-        } catch (error) {
-          log("Browser storage is unavailable; the Massive key will be used for this page session only.");
-        }
+        return "";
       }
 
       function hydrateMassiveKeyField() {
@@ -4492,14 +4480,23 @@
         if (!input) {
           return;
         }
-        const saved = storedMassiveKey();
-        if (saved && !input.value) {
-          input.value = saved;
-        }
+        input.value = "";
+        input.disabled = true;
+        input.placeholder = serverMassiveConfigured()
+          ? "Configured on server"
+          : "Set MASSIVE_API_KEY on server";
       }
 
       function massiveApiKey() {
-        return ($("massiveApiKey")?.value || storedMassiveKey()).trim();
+        return "";
+      }
+
+      function serverMassiveConfigured() {
+        return Boolean(state.marketDataConfig?.massive_configured);
+      }
+
+      function massiveReady() {
+        return serverMassiveConfigured();
       }
 
       function readRunReceipts() {
@@ -4749,11 +4746,13 @@
       }
 
       function updateMassiveKeyStatus() {
-        const keyReady = Boolean(massiveApiKey());
-        $("massiveKeyStatus").textContent = keyReady ? "Massive key ready" : "Massive key missing";
-        $("massiveKeyDetail").textContent = keyReady
-          ? "Import & Run Monitor will require a successful Massive pull before evaluation."
-          : "Paste your key once. Without it, Import & Run will use the online fallback for chart data.";
+        if (serverMassiveConfigured()) {
+          $("massiveKeyStatus").textContent = "Massive key configured on server";
+          $("massiveKeyDetail").textContent = "Server-side Massive key is configured. Import & Run Monitor can load Massive data without exposing the key to the browser.";
+          return;
+        }
+        $("massiveKeyStatus").textContent = "Server Massive key missing";
+        $("massiveKeyDetail").textContent = "Configure MASSIVE_API_KEY on the server before running the monitor. The browser never stores or sends the Massive key.";
       }
 
       function updateCsvStatus() {
@@ -4795,9 +4794,9 @@
           $("marketDataDetail").textContent = "Import a CSV before loading market data.";
         } else if (!dataTickers) {
           $("marketDataLabel").textContent = "No saved market data loaded";
-          $("marketDataDetail").textContent = massiveApiKey()
+          $("marketDataDetail").textContent = massiveReady()
             ? "Import & Run Monitor will backfill Massive bars, then evaluate only after that succeeds."
-            : "Paste a Massive key for real bars, or Import & Run will try the online fallback.";
+            : "Configure the server Massive key before running the monitor. Save Portfolio & Run Monitor requires Massive data.";
         } else {
           $("marketDataLabel").textContent = `${dataTickers}/${savedTickers} ticker(s) have market data`;
           $("marketDataDetail").textContent = "Charts can render for tickers with bars. Select a ticker and open its detail chart.";
@@ -5119,7 +5118,7 @@
         } else if (!csv.rowCount) {
           setNextAction("blocked", "Load a portfolio file", "Choose CSV, TSV, XLSX, or XLSM, or paste CSV rows into the editor.");
         } else if (!importIsCurrent || sourceNeedsSave) {
-          setNextAction("working", "Import & Run Monitor", massiveApiKey() ? "This will import tickers, load Massive bars, evaluate, and open a chart." : "This will import tickers, try the online fallback for bars, evaluate, and open a chart.");
+          setNextAction("working", "Import & Run Monitor", "This will import tickers, try server-side Massive bars, evaluate, and open a chart.");
         } else if (!savedSummary.ticker_count) {
           setNextAction("working", "Import & Run Monitor", "The selected portfolio does not have saved ticker rows yet.");
         } else if (!savedSummary.market_data_ticker_count) {
@@ -5187,6 +5186,15 @@
           throw new Error(payload.error || "Request failed");
         }
         return payload;
+      }
+
+      async function refreshMarketDataConfig() {
+        try {
+          state.marketDataConfig = await api("/market-data/config");
+        } catch (error) {
+          state.marketDataConfig = { massive_configured: false, massive_key_source: "unknown" };
+          log(`Market data configuration check failed: ${error.message}`);
+        }
       }
 
       function requirePortfolio() {
@@ -7621,6 +7629,9 @@
 
       async function initializeApp() {
         document.body.dataset.pageMode = state.pageMode;
+        await refreshMarketDataConfig();
+        hydrateMassiveKeyField();
+        renderAll();
         if (state.pageMode === "stock" && state.routePortfolioId && state.routeTicker) {
           state.selectedTicker = state.routeTicker;
           await loadPortfolios();
@@ -7681,12 +7692,7 @@
 
       async function backfillMassiveForPortfolio() {
         requirePortfolio();
-        const body = { end: $("asofDate").value || todayIso(), lookback: 250 };
-        const apiKey = massiveApiKey();
-        if (apiKey) {
-          body.api_key = apiKey;
-          body.timeout_seconds = 8;
-        }
+        const body = { end: $("asofDate").value || todayIso(), lookback: 250, timeout_seconds: 8 };
         setRunStatus("working", "Loading Massive bars", "Fetching real daily bars. This can take a moment on large portfolios.");
         const payload = await api(`/portfolios/${state.portfolioId}/backfill-massive`, {
           method: "POST",
@@ -7728,10 +7734,11 @@
       }
 
       async function loadPrimaryMarketDataForPortfolio() {
-        if (!massiveApiKey()) {
-          log("No Massive key saved. Trying the online fallback for chart data.");
-          setRunStatus("working", "No Massive key found", "Trying online fallback chart data.");
-          return backfillOnlineForPortfolio();
+        if (!massiveReady()) {
+          const message = "Massive key is missing on the server. Configure MASSIVE_API_KEY before running the monitor.";
+          log(message);
+          setRunStatus("error", "Massive key required", "Save Portfolio & Run Monitor requires Massive data. Online fallback is available only from Advanced manual controls.");
+          throw new Error(message);
         }
         try {
           return await withSlowNotice(
@@ -8003,7 +8010,7 @@
             log(`Using saved portfolio ${state.portfolioName}.`);
           }
           await ensureInvestorDefaultsForPortfolio();
-          setRunStatus("working", "Loading market data", massiveApiKey() ? "Loading Massive bars. The run will stop if Massive fails." : "No Massive key found; trying online fallback bars.");
+          setRunStatus("working", "Loading market data", "Trying server-side Massive bars first, then fallback bars if needed.");
           await loadPrimaryMarketDataForPortfolio();
           setRunStatus("working", "Evaluating playbook rules", "Checking current trigger state and creating alert records.");
           await evaluateCurrentPortfolio();
@@ -8063,7 +8070,7 @@
       });
 
       $("massiveApiKey").addEventListener("input", () => {
-        saveMassiveKey($("massiveApiKey").value.trim());
+        $("massiveApiKey").value = "";
         updateMassiveKeyStatus();
         updateMarketDataStatus();
         renderNextAction();
@@ -8071,11 +8078,10 @@
 
       $("clearMassiveKey").addEventListener("click", () => {
         $("massiveApiKey").value = "";
-        saveMassiveKey("");
         updateMassiveKeyStatus();
         updateMarketDataStatus();
         renderNextAction();
-        log("Massive key cleared from this browser.");
+        log("Massive keys are configured on the server, not stored in this browser.");
       });
 
       hydrateMassiveKeyField();

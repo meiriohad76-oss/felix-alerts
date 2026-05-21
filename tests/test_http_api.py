@@ -66,6 +66,18 @@ def raw_request(server, method, path):
     return response.status, headers, body
 
 
+def raw_json_request(server, method, path, body, headers=None):
+    host, port = server.server_address
+    conn = http.client.HTTPConnection(host, port, timeout=5)
+    request_headers = {"Content-Type": "application/json"}
+    request_headers.update(headers or {})
+    conn.request(method, path, body=body, headers=request_headers)
+    response = conn.getresponse()
+    raw = response.read().decode("utf-8")
+    conn.close()
+    return response.status, json.loads(raw)
+
+
 class HttpApiTests(unittest.TestCase):
     def test_market_data_config_reports_server_massive_key_without_leaking_secret(self):
         with patch.dict(os.environ, {"MASSIVE_API_KEY": "real-secret-value"}, clear=False):
@@ -81,6 +93,110 @@ class HttpApiTests(unittest.TestCase):
             finally:
                 server.shutdown()
                 server.server_close()
+
+    def test_json_response_does_not_emit_wildcard_cors_by_default(self):
+        server = create_server(db_path=":memory:", port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, headers, _ = raw_request(server, "GET", "/health")
+            self.assertEqual(status, 200)
+            self.assertNotIn("access-control-allow-origin", headers)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_json_body_size_limit_returns_413(self):
+        with patch.dict(os.environ, {"SENTINEL_MAX_JSON_BODY_BYTES": "32"}, clear=False):
+            server = create_server(db_path=":memory:", port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, data = raw_json_request(server, "POST", "/portfolios", '{"name":"' + ("x" * 64) + '"}')
+                self.assertEqual(status, 413)
+                self.assertIn("too large", data["error"])
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_malformed_json_returns_stable_400(self):
+        server = create_server(db_path=":memory:", port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, data = raw_json_request(server, "POST", "/portfolios", '{"name":')
+            self.assertEqual(status, 400)
+            self.assertEqual(data["error"], "request body must be valid JSON")
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_massive_backfill_uses_server_key_only(self):
+        previous = os.environ.pop("MASSIVE_API_KEY", None)
+        server = create_server(db_path=":memory:", port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, data = request(server, "POST", "/portfolios", {"name": "Server Key Only"})
+            self.assertEqual(status, 201)
+            portfolio_id = data["portfolio"]["portfolio_id"]
+
+            status, data = request(
+                server,
+                "POST",
+                "/portfolios/%s/backfill-massive" % portfolio_id,
+                {"api_key": "browser-secret", "end": "2025-05-31"},
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("server", data["error"].lower())
+            self.assertNotIn("browser-secret", json.dumps(data))
+        finally:
+            if previous is not None:
+                os.environ["MASSIVE_API_KEY"] = previous
+            server.shutdown()
+            server.server_close()
+
+    def test_invalid_ack_kind_returns_400_without_mutating_alert(self):
+        server = create_server(db_path=":memory:", port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, data = request(server, "POST", "/portfolios", {"name": "Ack Validation"})
+            self.assertEqual(status, 201)
+            portfolio_id = data["portfolio"]["portfolio_id"]
+            status, _ = request(
+                server,
+                "POST",
+                "/portfolios/%s/import" % portfolio_id,
+                {"csv_text": "ticker,type,shares,entry_price,current_profit_lock\nAAPL,investor,10,110,95\n"},
+            )
+            self.assertEqual(status, 200)
+            workspace = server.RequestHandlerClass.api.workspace
+            workspace.backfill_market_data(
+                portfolio_id=UUID(portfolio_id),
+                provider=InMemoryMarketDataProvider.from_items([("AAPL", p1_cross_below_sma150_bars())]),
+                end=date(2025, 5, 31),
+            )
+            status, data = request(server, "POST", "/portfolios/%s/evaluate" % portfolio_id, {"asof": "2025-05-31"})
+            self.assertEqual(status, 200)
+            alert_id = data["alerts"][0]["alert_id"]
+
+            status, data = request(
+                server,
+                "POST",
+                "/portfolios/%s/alerts/%s/ack" % (portfolio_id, alert_id),
+                {"ack_kind": "snoozed"},
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("ack_kind", data["error"])
+
+            status, data = request(server, "GET", "/portfolios/%s/alerts" % portfolio_id)
+            self.assertEqual(status, 200)
+            self.assertEqual(data["alerts"][0]["status"], "new")
+            self.assertIsNone(data["alerts"][0]["ack_kind"])
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_macos_proxy_detection_retries_unstable_wpad_pac(self):
         from sentinel_core import http_api
@@ -955,7 +1071,9 @@ class HttpApiTests(unittest.TestCase):
                     raise OSError("offline")
                 return original_create_connection(address, *args, **kwargs)
 
-            with patch("sentinel_core.http_api._detect_proxy_url", return_value=None), patch(
+            with patch.dict(os.environ, {"MASSIVE_API_KEY": "secret"}, clear=False), patch(
+                "sentinel_core.http_api._detect_proxy_url", return_value=None
+            ), patch(
                 "sentinel_core.http_api.socket.create_connection",
                 side_effect=fake_create_connection,
             ):
@@ -963,7 +1081,7 @@ class HttpApiTests(unittest.TestCase):
                     server,
                     "POST",
                     "/portfolios/%s/backfill-massive" % portfolio_id,
-                    {"api_key": "secret", "end": "2026-05-17"},
+                    {"end": "2026-05-17"},
                 )
 
             self.assertEqual(status, 503)
@@ -1062,7 +1180,9 @@ class HttpApiTests(unittest.TestCase):
                 )
                 setup_store.conn.close()
 
-                with patch("sentinel_core.http_api.MassiveMarketDataProvider", FakeMassiveProvider), patch(
+                with patch.dict(os.environ, {"MASSIVE_API_KEY": "secret"}, clear=False), patch(
+                    "sentinel_core.http_api.MassiveMarketDataProvider", FakeMassiveProvider
+                ), patch(
                     "sentinel_core.http_api._https_connectivity_error_with_proxy_retry",
                     return_value=(None, None),
                 ), patch("sentinel_core.http_api._detect_proxy_url", return_value=None):
@@ -1070,7 +1190,7 @@ class HttpApiTests(unittest.TestCase):
                         server,
                         "POST",
                         "/portfolios/%s/backfill-massive" % portfolio_id,
-                        {"api_key": "secret", "end": "2025-05-31", "failed_only": True},
+                        {"end": "2025-05-31", "failed_only": True},
                     )
 
                 self.assertEqual(status, 200)

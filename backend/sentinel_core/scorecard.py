@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from .models import AckKind, AlertRecord, ScorecardEvent, ScorecardEventKind
 
+VALID_ACK_KINDS = {"placed", "placed_with_modification", "ignored"}
+
 
 def acknowledge_alert(
     alert: AlertRecord,
@@ -16,6 +18,8 @@ def acknowledge_alert(
     note: str = "",
     acknowledged_at: Optional[datetime] = None,
 ) -> Tuple[AlertRecord, Optional[ScorecardEvent]]:
+    if ack_kind not in VALID_ACK_KINDS:
+        raise ValueError("ack_kind must be placed, placed_with_modification, or ignored")
     if ack_kind in {"placed_with_modification", "ignored"} and not note.strip():
         raise ValueError("%s acknowledgement requires a note" % ack_kind)
 
