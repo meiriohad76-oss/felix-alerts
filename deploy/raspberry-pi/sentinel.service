@@ -9,6 +9,7 @@ User=sentinel
 Group=sentinel
 WorkingDirectory=/opt/sentinel
 EnvironmentFile=/etc/sentinel/sentinel.env
+Environment=PYTHONPATH=/opt/sentinel/backend
 ExecStart=/opt/sentinel/.venv/bin/python /opt/sentinel/scripts/run_dev_server.py --host ${HOST} --port ${PORT} --db-path ${SENTINEL_DB_PATH} --static-dir ${SENTINEL_STATIC_DIR}
 Restart=on-failure
 RestartSec=5

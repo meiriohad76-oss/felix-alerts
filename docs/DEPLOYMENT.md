@@ -50,7 +50,7 @@ On the Pi:
 
 ```bash
 sudo apt-get update
-sudo apt-get install -y git python3 python3-venv python3-pip
+sudo apt-get install -y git python3 python3-venv python3-pip sqlite3
 sudo mkdir -p /opt/sentinel
 sudo chown "$USER":"$USER" /opt/sentinel
 ```
@@ -113,14 +113,81 @@ sudo systemctl stop sentinel
 Back up the SQLite database:
 
 ```bash
-sudo systemctl stop sentinel
-sudo cp /var/lib/sentinel/sentinel.sqlite3 "/var/lib/sentinel/sentinel-$(date +%F).sqlite3"
-sudo systemctl start sentinel
+sudo /opt/sentinel/deploy/raspberry-pi/backup_database.sh
+```
+
+Restore from a known-good backup:
+
+```bash
+sudo /opt/sentinel/deploy/raspberry-pi/restore_database.sh /var/backups/sentinel/sentinel-YYYYMMDD-HHMMSS.sqlite3
 ```
 
 ## 3. Cloudflare Tunnel
 
 Use Cloudflare Tunnel only after the Pi service is healthy locally.
+
+The production Pi currently uses an existing Cloudflare-managed tunnel rather
+than a Sentinel-created tunnel:
+
+- Tunnel name: `pi-ai`
+- Tunnel ID: `8425f5a7-41f8-4c3a-96bd-9adaa35f7010`
+- Public hostname: `sentinel1.ahaddashboards.uk`
+- Local Sentinel service: `http://127.0.0.1:8765`
+
+Important: this tunnel receives a remote configuration from the Cloudflare Zero
+Trust dashboard. When cloudflared logs `Updated to new configuration`, that
+remote dashboard configuration is authoritative. Editing
+`/etc/cloudflared/config.yml` alone will not publish a new hostname for this
+tunnel.
+
+### Existing Dashboard-Managed Tunnel
+
+Use this path for the current Pi.
+
+1. Open Cloudflare Zero Trust.
+2. Go to `Networks -> Tunnels`.
+3. Open the existing `pi-ai` tunnel.
+4. Add or edit a public hostname:
+   - Subdomain: `sentinel1`
+   - Domain: `ahaddashboards.uk`
+   - Service type: `HTTP`
+   - Service URL: `127.0.0.1:8765`
+5. Save the hostname.
+6. Restart cloudflared on the Pi:
+
+```bash
+sudo systemctl restart cloudflared
+sleep 8
+sudo systemctl status cloudflared --no-pager -l
+```
+
+Smoke test:
+
+```bash
+curl -i https://sentinel1.ahaddashboards.uk/health
+curl -i https://sentinel1.ahaddashboards.uk/ | head -n 20
+```
+
+Expected:
+
+- `/health` returns HTTP 200 and `{"ok": true}`.
+- `/` returns HTTP 200 and the Sentinel HTML.
+
+`curl -I` sends a HEAD request. Sentinel supports HEAD for health and static
+routes, so it should return headers without a body after the HEAD-support build
+is deployed.
+
+If the public hostname returns 404 but local Sentinel works, inspect the
+cloudflared logs:
+
+```bash
+sudo journalctl -u cloudflared -n 120 --no-pager
+```
+
+If the logs show a remote config that does not include
+`sentinel1.ahaddashboards.uk`, update the hostname in the Cloudflare dashboard.
+
+### New Locally Managed Tunnel
 
 ### Install Cloudflared
 

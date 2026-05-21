@@ -71,6 +71,8 @@ class SentinelApi:
     def handle(self, method: str, path: str, query: dict, body: dict) -> tuple[HTTPStatus, dict]:
         if method == "GET" and path == "/health":
             return HTTPStatus.OK, {"ok": True}
+        if method == "GET" and path == "/market-data/config":
+            return HTTPStatus.OK, self.market_data_config()
         if method == "POST" and path == "/portfolio-file/convert":
             return HTTPStatus.OK, self.convert_portfolio_file(body)
         if method == "POST" and path == "/portfolios":
@@ -258,6 +260,13 @@ class SentinelApi:
             })
         return {"results": tuple(results), "delivery_status": self.notification_delivery_status()}
 
+    def market_data_config(self) -> dict:
+        massive_configured = bool(os.environ.get("MASSIVE_API_KEY", "").strip())
+        return {
+            "massive_configured": massive_configured,
+            "massive_key_source": "server_env" if massive_configured else "none",
+        }
+
     def convert_portfolio_file(self, body: dict) -> dict:
         filename = (body.get("filename") or "").strip()
         content_base64 = body.get("content_base64")
@@ -401,6 +410,7 @@ class SentinelApi:
         return {
             "portfolio": portfolio,
             "summary": summary,
+            "qa_summary": _portfolio_qa_summary(portfolio, ticker_rows, summary),
             "latest_run": self.workspace.store.latest_monitor_run(portfolio_id),
             "tickers": ticker_rows,
             "subscription_summary": subscription_summary,
@@ -669,7 +679,28 @@ class SentinelApi:
             timeout_seconds=int(body.get("timeout_seconds", 15)),
             proxy_url=_detect_proxy_url(),
         )
-        tickers = self.workspace.store.list_tickers(portfolio_id, include_inactive=False)
+        all_tickers = self.workspace.store.list_tickers(portfolio_id, include_inactive=False)
+        failed_only = bool(body.get("failed_only"))
+        if failed_only:
+            retry_tickers = []
+            for ticker in all_tickers:
+                status = self.workspace.store.get_market_data_status(ticker.ticker)
+                if (
+                    status.get("last_attempt_source") == "massive-stocks-aggregates"
+                    and status.get("last_attempt_status") == "failed"
+                ):
+                    retry_tickers.append(ticker)
+            tickers = tuple(retry_tickers)
+        else:
+            tickers = all_tickers
+        if failed_only and not tickers:
+            return {
+                "updated": (),
+                "failed": (),
+                "source": "massive-stocks-aggregates",
+                "mode": "failed_only",
+                "selected": (),
+            }
         connectivity_error, provider.proxy_url = _https_connectivity_error_with_proxy_retry(
             provider.base_url,
             timeout_seconds=min(provider.timeout_seconds, 8),
@@ -728,7 +759,13 @@ class SentinelApi:
                 source_label="Massive Stocks Aggregates",
             )
             updated.append(ticker.ticker)
-        return {"updated": tuple(updated), "failed": tuple(failed), "source": "massive-stocks-aggregates"}
+        return {
+            "updated": tuple(updated),
+            "failed": tuple(failed),
+            "source": "massive-stocks-aggregates",
+            "mode": "failed_only" if failed_only else "all",
+            "selected": tuple(ticker.ticker for ticker in tickers),
+        }
 
     def evaluate(self, portfolio_id: UUID, body: dict) -> dict:
         asof = date.fromisoformat(body.get("asof", date.today().isoformat()))
@@ -963,6 +1000,64 @@ def _trigger_watch(rule_id: str, *, condition: str, status: str, evidence: dict)
     }
 
 
+def _portfolio_qa_summary(portfolio, ticker_rows: list[dict], summary: dict) -> dict:
+    massive_failed_rows = [
+        row
+        for row in ticker_rows
+        if row["market_data_status"].get("last_attempt_source") == "massive-stocks-aggregates"
+        and row["market_data_status"].get("last_attempt_status") == "failed"
+    ]
+    no_market_data_rows = [row for row in ticker_rows if not row["bars_count"]]
+    setup_needed_rows = [
+        row
+        for row in ticker_rows
+        if (
+            row["type"] == "unknown"
+            or row["entry_price"] is None
+            or row["current_profit_lock"] is None
+            or row["trigger_summary"].get("data_gap_count", 0) > 0
+            or row["missing_rule_ids"]
+        )
+    ]
+    near_trigger_rows = [
+        row
+        for row in ticker_rows
+        if (row["trigger_summary"].get("max_proximity_score") or 0) >= 75
+    ]
+
+    next_steps = []
+    if massive_failed_rows:
+        next_steps.append("Retry failed Massive symbols")
+    if no_market_data_rows:
+        next_steps.append("Load market data for symbols without bars")
+    if setup_needed_rows:
+        next_steps.append("Enter missing stop/profit-lock setup data")
+    if summary.get("classification_needed_count"):
+        next_steps.append("Classify unknown ticker styles")
+    if summary.get("open_alert_count"):
+        next_steps.append("Review open alert queue")
+    if not next_steps:
+        next_steps.append("Portfolio QA is clear")
+
+    return {
+        "portfolio_name": portfolio.name,
+        "ticker_count": summary.get("ticker_count", len(ticker_rows)),
+        "active_ticker_count": summary.get("active_ticker_count", 0),
+        "market_data_ticker_count": summary.get("market_data_ticker_count", 0),
+        "open_alert_count": summary.get("open_alert_count", 0),
+        "classification_needed_count": summary.get("classification_needed_count", 0),
+        "massive_failed_count": len(massive_failed_rows),
+        "no_market_data_count": len(no_market_data_rows),
+        "setup_needed_count": len(setup_needed_rows),
+        "near_trigger_count": len(near_trigger_rows),
+        "massive_failed_tickers": tuple(row["ticker"] for row in massive_failed_rows),
+        "no_market_data_tickers": tuple(row["ticker"] for row in no_market_data_rows),
+        "setup_needed_tickers": tuple(row["ticker"] for row in setup_needed_rows),
+        "near_trigger_tickers": tuple(row["ticker"] for row in near_trigger_rows),
+        "next_steps": tuple(next_steps),
+    }
+
+
 def _subscription_detail(subscription) -> dict:
     rule = get_rule(subscription.rule_id)
     return {
@@ -1067,7 +1162,7 @@ def _p7_trigger_watch(ticker) -> dict:
     )
 
 
-def _t5_trigger_watch(ticker) -> dict:
+def _t5_trigger_watch(ticker, *, primary_exit_rule_id: Optional[str] = None) -> dict:
     if not ticker.bars:
         return _trigger_watch(
             "T5",
@@ -1084,10 +1179,13 @@ def _t5_trigger_watch(ticker) -> dict:
             evidence={"asof": current_bar.date.isoformat(), "missing": ["entry_price"]},
         )
     drawdown = (current_bar.adj_close / ticker.entry_price) - Decimal("1")
+    status = "active" if drawdown <= Decimal("-0.15") else "watching"
+    if status == "active" and primary_exit_rule_id:
+        status = "covered_by_primary_exit"
     return _trigger_watch(
         "T5",
         condition="Close is down 15% or more from entry without a primary exit alert.",
-        status="active" if drawdown <= Decimal("-0.15") else "watching",
+        status=status,
         evidence={
             "asof": current_bar.date.isoformat(),
             "entry_price": str(ticker.entry_price),
@@ -1096,6 +1194,7 @@ def _t5_trigger_watch(ticker) -> dict:
             "current_profit_lock": str(ticker.current_profit_lock)
             if ticker.current_profit_lock is not None
             else None,
+            "primary_exit_rule_id": primary_exit_rule_id,
         },
     )
 
@@ -1107,10 +1206,18 @@ def _portfolio_trigger_watches(ticker, subscriptions) -> tuple[dict, ...]:
         potential_triggers.append(_exit_trigger_watch(ticker, "P1", 150))
     if "P2" in enabled_rule_ids:
         potential_triggers.append(_exit_trigger_watch(ticker, "P2", 50))
+    primary_exit_rule_id = next(
+        (
+            trigger["rule_id"]
+            for trigger in potential_triggers
+            if trigger["status"] in {"triggered", "active"}
+        ),
+        None,
+    )
     if "P7" in enabled_rule_ids:
         potential_triggers.append(_p7_trigger_watch(ticker))
     if "T5" in enabled_rule_ids:
-        potential_triggers.append(_t5_trigger_watch(ticker))
+        potential_triggers.append(_t5_trigger_watch(ticker, primary_exit_rule_id=primary_exit_rule_id))
     return tuple(potential_triggers)
 
 
@@ -1259,6 +1366,9 @@ def make_handler(api: SentinelApi, static_dir: Optional[Path] = None):
         def do_GET(self) -> None:
             self._dispatch()
 
+        def do_HEAD(self) -> None:
+            self._dispatch()
+
         def do_POST(self) -> None:
             self._dispatch()
 
@@ -1267,15 +1377,16 @@ def make_handler(api: SentinelApi, static_dir: Optional[Path] = None):
 
         def _dispatch(self) -> None:
             parsed = urlparse(self.path)
-            if self.command == "GET" and static_dir:
+            if self.command in {"GET", "HEAD"} and static_dir:
                 static_path = self._static_path(parsed.path)
                 if static_path:
                     self._send_static(static_path)
                     return
             try:
                 body = self._read_json_body()
+                api_method = "GET" if self.command == "HEAD" else self.command
                 status, payload = api.handle(
-                    self.command,
+                    api_method,
                     parsed.path,
                     parse_qs(parsed.query),
                     body,
@@ -1320,7 +1431,8 @@ def make_handler(api: SentinelApi, static_dir: Optional[Path] = None):
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Access-Control-Allow-Origin", "*")
             self.end_headers()
-            self.wfile.write(raw)
+            if self.command != "HEAD":
+                self.wfile.write(raw)
 
         def _send_static(self, path: Path) -> None:
             if not path.exists():
@@ -1334,7 +1446,8 @@ def make_handler(api: SentinelApi, static_dir: Optional[Path] = None):
             self.send_header("Pragma", "no-cache")
             self.send_header("Expires", "0")
             self.end_headers()
-            self.wfile.write(raw)
+            if self.command != "HEAD":
+                self.wfile.write(raw)
 
     Handler.api = api
     return Handler

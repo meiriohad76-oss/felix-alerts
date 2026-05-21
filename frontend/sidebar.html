@@ -858,6 +858,7 @@
 
       .chart-marker-tooltip rect {
         fill: #101827;
+        fill-opacity: 0.96;
         stroke: #475878;
         stroke-width: 1;
       }
@@ -1161,6 +1162,29 @@
       .overview-urgent-list {
         display: grid;
         gap: 10px;
+      }
+
+      .portfolio-qa-grid {
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .portfolio-qa-steps {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 8px;
+        margin-top: 12px;
+      }
+
+      .portfolio-qa-steps span {
+        border: 1px solid var(--border);
+        background: #0b1326;
+        border-radius: 4px;
+        padding: 5px 8px;
+        color: var(--text);
+        font-size: 12px;
+        line-height: 17px;
       }
 
       body[data-active-display="stock"] .chart-viewport {
@@ -3380,6 +3404,11 @@
         line-height: 17px;
       }
 
+      .setup-data-form.profit-lock-action {
+        border-color: #3f7b61;
+        background: #0c1a18;
+      }
+
       .setup-data-fields {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -4379,6 +4408,8 @@
         .focus-panel,
         .alert,
         .drawer-grid,
+        .overview-grid,
+        .portfolio-qa-grid,
         .summary,
         .two,
         .report-summary,
@@ -4485,6 +4516,7 @@
             </div>
             <div id="overviewBottomLine"></div>
             <div id="overviewUrgentHoldings"></div>
+            <div id="portfolioQaPanel"></div>
             <section class="monitor-context" aria-label="Monitor Snapshot">
               <div id="runReceiptPanel" class="context-card"></div>
               <div id="stockSnapshotPanel" class="context-card"></div>
@@ -4829,6 +4861,7 @@
         lastBackfill: null,
         lastEvaluation: null,
         lastRunReceipt: null,
+        marketDataConfig: { massive_configured: false, massive_key_source: "unknown" },
         chartRange: 120,
         chartWindowOffset: 0,
         chartMode: "clean",
@@ -4927,7 +4960,7 @@
           plain_label: "15% loss limit warning",
           technical_name: "Recovery violation",
           short_summary: "A position down more than 15% without an exit is a rule violation.",
-          plain_english: "Sell/protection violation. This watch fires when the position is 15% or more below entry and no primary exit already handled it, putting the stock in the methodology danger zone.",
+          plain_english: "Recovery risk watch. This watch fires only when the position is 15% or more below entry and no primary exit already handled it.",
           watch_definition: "Whether the stock is 15% or more below the entry price without another exit signal already handling it.",
           why_matters: "Losses become harder to recover as they grow. This warning shows when the position has entered the playbook danger zone.",
           watch_action: "No action needed right now while there is buffer. If it breaches, review missing or misplaced protection immediately.",
@@ -5103,6 +5136,10 @@
       function rowPlainEnglish(row) {
         const ruleId = row.subscription.rule_id;
         const evidence = row.trigger?.evidence || row.alert?.explanation?.evidence || row.alert?.evidence || {};
+        const stateAware = rowStateAwarePlainEnglish(row, evidence);
+        if (stateAware) {
+          return stateAware;
+        }
         if (isSetupIssueStatus(row.status.status)) {
           if (ruleId === "T1" || ruleId === "A1") {
             return `${ruleDisplayLabel(ruleId)}: ${rulePlainEnglish(ruleId)} Missing: ${missingFieldList(evidence)}.`;
@@ -5115,6 +5152,34 @@
           }
         }
         return rulePlainEnglish(ruleId);
+      }
+
+      function rowStateAwarePlainEnglish(row, evidence = {}) {
+        if (row.subscription.rule_id !== "T5") {
+          return "";
+        }
+        const drawdown = toNumber(evidence.drawdown_pct);
+        const buffer = drawdown === null ? null : 0.15 - Math.abs(drawdown);
+        if (row.status.status === "covered_by_primary_exit") {
+          return "This 15% loss-limit watch is covered by the active primary exit signal. Handle the primary exit first; do not count T5 as a separate violation.";
+        }
+        if (isCurrentActionStatus(row.status.status)) {
+          return drawdown === null
+            ? "This position breached the 15% loss-limit rule."
+            : `This position is ${formatAbsPercent(drawdown)} below entry, breaching the 15% loss-limit rule.`;
+        }
+        if (row.status.status === "near") {
+          return drawdown === null
+            ? "This position is near the 15% loss-limit threshold."
+            : `This position is ${formatAbsPercent(drawdown)} below entry, leaving ${formatAbsPercent(buffer)} before the 15% loss-limit rule. Prepare, but do not treat it as triggered yet.`;
+        }
+        if (row.status.status === "watching" && drawdown !== null && drawdown < 0 && buffer !== null && buffer > 0) {
+          return `This stock is ${formatAbsPercent(drawdown)} below entry, leaving ${formatAbsPercent(buffer)} before the 15% loss-limit rule. No T5 action is needed while there is buffer.`;
+        }
+        if (row.status.status === "watching" && drawdown !== null && drawdown >= 0) {
+          return `This stock is ${formatPercent(drawdown)} above entry. The 15% loss-limit rule is not close.`;
+        }
+        return "";
       }
 
       function setupStopHasRecommendation(evidence = {}) {
@@ -5141,6 +5206,9 @@
         if (isHistoricalAlertStatus(row.status.status)) {
           return "Historical alert only. No current action from this alert.";
         }
+        if (row.status.status === "covered_by_primary_exit") {
+          return "Handle the primary exit first. Do not count T5 as a separate action.";
+        }
         if ((ruleId === "T1" || ruleId === "A1") && (isActionStatus(row.status.status) || isSetupIssueStatus(row.status.status))) {
           return setupStopActionText(ruleId, evidence);
         }
@@ -5148,7 +5216,7 @@
           return row.trigger?.recommended_action || row.alert?.explanation?.recommended_action || row.alert?.recommended_action || row.subscription.recommended_action || ruleCopy(row.subscription.rule_id).recommended_action;
         }
         if (row.status.status === "near") {
-          return "Prepare. Review position size, protection, and the playbook rule before it fires.";
+          return nearTriggerRecommendedAction(ruleId);
         }
         if (isSetupIssueStatus(row.status.status)) {
           return row.trigger?.recommended_action || row.alert?.explanation?.recommended_action || row.subscription.recommended_action || ruleCopy(row.subscription.rule_id).watch_action;
@@ -5249,6 +5317,51 @@
             ${suggestionMarkup}
             <div class="setup-data-fields">${fieldMarkup.join("")}</div>
             <button class="primary" data-save-setup="${escapeHtml(ticker)}">Save setup data</button>
+          </div>
+        `;
+      }
+
+      function profitLockRaiseActionMarkup(source = {}) {
+        const ruleId = source.subscription?.rule_id
+          || source.trigger?.rule_id
+          || source.alert?.explanation?.rule_id
+          || source.explanation?.rule_id
+          || source.rule_id
+          || source.result?.rule_id
+          || "";
+        if (ruleId !== "T4") {
+          return "";
+        }
+        const evidence = source.trigger?.evidence
+          || source.alert?.explanation?.evidence
+          || source.explanation?.evidence
+          || source.evidence
+          || source.result?.payload
+          || {};
+        const proposed = toNumber(evidence.proposed_profit_lock);
+        if (proposed === null) {
+          return "";
+        }
+        const current = toNumber(evidence.current_profit_lock);
+        const ticker = source.subscription?.ticker
+          || source.result?.ticker
+          || state.selectedTicker
+          || "this stock";
+        return `
+          <div class="setup-data-form profit-lock-action" data-setup-form="${escapeHtml(ticker)}">
+            <p>Sentinel recommends raising the monitored stop/profit-lock from ${formatNumber(current)} to ${formatNumber(proposed)}. Review or edit the value below, then save it. Saving updates Sentinel monitoring only; it does not place a broker order.</p>
+            <div class="suggested-stop-card">
+              <strong>Recommended profit lock: ${formatNumber(proposed)}</strong>
+              <span>Basis: higher swing low ${formatNumber(evidence.swing_low_price)}${evidence.swing_low_date ? ` on ${escapeHtml(evidence.swing_low_date)}` : ""}, exit SMA ${formatNumber(evidence.exit_ma)}, and ${formatAbsPercent(evidence.buffer_pct || 0)} buffer.</span>
+              <button type="button" data-use-profit-lock="${formatNumber(proposed)}">Use recommended profit lock</button>
+            </div>
+            <div class="setup-data-fields">
+              <label>
+                Stop / profit-lock level to monitor
+                <input type="number" min="0" step="0.01" data-setup-field="current_profit_lock" value="${formatNumber(proposed)}" placeholder="Enter stop/profit-lock level" />
+              </label>
+            </div>
+            <button class="primary" data-save-setup="${escapeHtml(ticker)}">Save profit lock</button>
           </div>
         `;
       }
@@ -5365,6 +5478,14 @@
 
       function massiveApiKey() {
         return ($("massiveApiKey")?.value || storedMassiveKey()).trim();
+      }
+
+      function serverMassiveConfigured() {
+        return Boolean(state.marketDataConfig?.massive_configured);
+      }
+
+      function massiveReady() {
+        return Boolean(massiveApiKey()) || serverMassiveConfigured();
       }
 
       function loadActivePortfolioId() {
@@ -5647,9 +5768,16 @@
       }
 
       function updateMassiveKeyStatus() {
-        const keyReady = Boolean(massiveApiKey());
-        $("massiveKeyStatus").textContent = keyReady ? "Massive key ready" : "Massive key missing";
-        $("massiveKeyDetail").textContent = keyReady
+        const browserKeyReady = Boolean(massiveApiKey());
+        if (serverMassiveConfigured()) {
+          $("massiveKeyStatus").textContent = "Massive key configured on server";
+          $("massiveKeyDetail").textContent = browserKeyReady
+            ? "Server-side Massive key is configured. The browser key can override it for this run."
+            : "Server-side Massive key is configured. Import & Run Monitor can load Massive data without pasting a browser key.";
+          return;
+        }
+        $("massiveKeyStatus").textContent = browserKeyReady ? "Massive key ready" : "Massive key missing";
+        $("massiveKeyDetail").textContent = browserKeyReady
           ? "Import & Run Monitor will require a successful Massive pull before evaluation."
           : "Massive key required. Paste your key before running the monitor. The online fallback is only an advanced manual option.";
       }
@@ -5700,11 +5828,11 @@
           $("marketDataDetail").textContent = "Import a CSV before loading market data.";
         } else if (!dataTickers) {
           $("marketDataLabel").textContent = "No saved market data loaded";
-          $("marketDataDetail").textContent = massiveApiKey()
+          $("marketDataDetail").textContent = massiveReady()
             ? "Import & Run Monitor will backfill Massive bars, then evaluate only after that succeeds."
             : "Paste a Massive key before running the monitor. Save Portfolio & Run Monitor requires Massive data.";
         } else if (dataTickers < savedTickers) {
-          const keyText = massiveApiKey()
+          const keyText = massiveReady()
             ? "Run the monitor again with the active Massive key to fill missing symbols."
             : "Massive key was not active for that run; paste the key and run the monitor again.";
           const failureText = failedAttempts.length
@@ -6111,7 +6239,7 @@
         } else if (!state.portfolioId) {
           setNextAction("working", "Import & Run Monitor", "This will create the portfolio, load market data, evaluate, and open the chart.");
         } else if (csv.rowCount && (!importIsCurrent || sourceNeedsSave)) {
-          setNextAction("working", "Import & Run Monitor", massiveApiKey() ? "This will import tickers, load Massive bars, evaluate, and open a chart." : "Save Portfolio & Run Monitor requires Massive. Paste the key before running.");
+          setNextAction("working", "Import & Run Monitor", massiveReady() ? "This will import tickers, load Massive bars, evaluate, and open a chart." : "Save Portfolio & Run Monitor requires Massive. Paste the key before running.");
         } else if (!savedTickerCount) {
           if (!csv.rowCount) {
             setNextAction("blocked", "Load a portfolio file", "Choose CSV, TSV, XLSX, or XLSM, or paste CSV rows into the editor.");
@@ -6189,6 +6317,30 @@
         return payload;
       }
 
+      async function refreshMarketDataConfig() {
+        try {
+          state.marketDataConfig = await api("/market-data/config");
+        } catch (error) {
+          state.marketDataConfig = { massive_configured: false, massive_key_source: "unknown" };
+          log(`Market data configuration check failed: ${error.message}`);
+        }
+      }
+
+      async function fetchTickerDetail(ticker, attempts = 3) {
+        let lastError = null;
+        for (let attempt = 1; attempt <= attempts; attempt += 1) {
+          try {
+            return await api(`/portfolios/${state.portfolioId}/tickers/${encodeURIComponent(ticker)}`);
+          } catch (error) {
+            lastError = error;
+            if (attempt < attempts) {
+              await delay(200 * attempt);
+            }
+          }
+        }
+        throw lastError;
+      }
+
       function requirePortfolio() {
         if (!state.portfolioId) {
           throw new Error("Create or select a portfolio first.");
@@ -6259,7 +6411,7 @@
         }
         if (state.selectedTicker) {
           try {
-            state.tickerDetail = await api(`/portfolios/${state.portfolioId}/tickers/${encodeURIComponent(state.selectedTicker)}`);
+            state.tickerDetail = await fetchTickerDetail(state.selectedTicker);
             setDisplayError("");
           } catch (error) {
             setDisplayError(EMPTY_MESSAGES.tickerMissing);
@@ -7104,21 +7256,102 @@
         return alert?.explanation?.evidence || alert?.evidence || alert?.result?.payload || {};
       }
 
+      function chartAlertStatusKey(marker) {
+        const rawStatus = String(`${marker?.marker_status || ""} ${marker?.status || ""}`).toLowerCase();
+        if (rawStatus.includes("not triggered")) {
+          return "watching";
+        }
+        if (rawStatus.includes("near")) {
+          return "near";
+        }
+        if (rawStatus.includes("trigger") || rawStatus.includes("exit signal") || rawStatus.includes("new") || rawStatus.includes("sent")) {
+          return "triggered";
+        }
+        if (rawStatus.includes("active")) {
+          return "active";
+        }
+        return rawStatus.replace(/\s+/g, "_");
+      }
+
+      function movingAverageTriggerText(alert, ticker, ruleId, evidence) {
+        const period = evidence.exit_ma_period || (ruleId === "P1" ? 150 : 50);
+        const close = toNumber(evidence.close);
+        const exitMa = toNumber(evidence.exit_ma);
+        if (close === null || exitMa === null) {
+          return `${ticker} is being compared with SMA${period}.`;
+        }
+        const relation = close < exitMa ? "below" : "above";
+        const distance = toNumber(evidence.distance_pct);
+        const distanceText = distance !== null ? ` (${formatAbsPercent(distance)} ${relation})` : "";
+        if (chartAlertStatusKey(alert) === "near" && close >= exitMa) {
+          return `${ticker} closed at ${formatNumber(close)}, above SMA${period} ${formatNumber(exitMa)}${distanceText}. This is a near watch, not an exit signal.`;
+        }
+        return `${ticker} closed at ${formatNumber(close)}, ${relation} SMA${period} ${formatNumber(exitMa)}${distanceText}.`;
+      }
+
+      function volumeTriggerText(alert, ticker, evidence) {
+        const close = toNumber(evidence.close);
+        const open = toNumber(evidence.open);
+        const volumeMultiple = toNumber(evidence.volume_multiple);
+        const dayDirection = close !== null && open !== null ? (close < open ? "down day" : close > open ? "up day" : "flat day") : "day";
+        const multipleText = volumeMultiple !== null ? `${formatNumber(volumeMultiple, 1)}x normal volume` : "unusual volume";
+        if (chartAlertStatusKey(alert) === "near") {
+          return `${ticker} has elevated volume at ${multipleText} on a ${dayDirection}. This is elevated volume, not the full 5x down-day distribution trigger.`;
+        }
+        return `${ticker} had ${multipleText} on a ${dayDirection}.`;
+      }
+
+      function drawdownTriggerText(alert, ticker, evidence) {
+        const drawdown = toNumber(evidence.drawdown_pct);
+        const close = toNumber(evidence.close);
+        const entry = toNumber(evidence.entry_price);
+        if (drawdown === null) {
+          return `${ticker} drawdown is being compared with the 15% loss-limit rule.`;
+        }
+        const direction = drawdown > 0 ? "up" : "down";
+        const priceText = close !== null || entry !== null
+          ? `: close ${formatNumber(close)} vs entry ${formatNumber(entry)}`
+          : "";
+        const base = `${ticker} is ${direction} ${formatAbsPercent(drawdown)} from entry${priceText}.`;
+        if (chartAlertStatusKey(alert) === "near" && drawdown > -0.15) {
+          const buffer = 0.15 - Math.abs(drawdown);
+          return `${base} This is near the 15% loss-limit watch, not a confirmed violation. Buffer before the 15% limit: ${formatAbsPercent(buffer)}.`;
+        }
+        if (drawdown <= -0.15) {
+          return `${base} This breaches the 15% loss-limit rule.`;
+        }
+        return base;
+      }
+
+      function nearTriggerRecommendedAction(alertOrRuleId) {
+        const ruleId = typeof alertOrRuleId === "string" ? alertOrRuleId : alertRuleId(alertOrRuleId);
+        if (ruleId === "P1" || ruleId === "P2") {
+          return "Prepare. Review the position and wait for a confirmed close below the moving average before treating this as an exit.";
+        }
+        if (ruleId === "P7") {
+          return "Prepare. Watch for a 5x volume down day before treating this as distribution.";
+        }
+        if (ruleId === "T5") {
+          return "Prepare. Check protection and wait for a 15% drawdown breach before treating this as a recovery violation.";
+        }
+        return "Prepare. Review position size, protection, and the playbook rule before it fires.";
+      }
+
       function alertTriggerText(alert) {
         const ruleId = alert?.explanation?.rule_id || alert?.rule_id || alert?.result?.rule_id;
         const ticker = alert?.result?.ticker || state.selectedTicker || "Ticker";
         const evidence = alertEvidence(alert);
         if (ruleId === "P1" || ruleId === "P2") {
-          return `${ticker} closed at ${formatNumber(evidence.close)}, below SMA${evidence.exit_ma_period || (ruleId === "P1" ? 150 : 50)} ${formatNumber(evidence.exit_ma)}.`;
+          return movingAverageTriggerText(alert, ticker, ruleId, evidence);
         }
         if (ruleId === "P7") {
-          return `${ticker} had ${formatNumber(evidence.volume_multiple, 1)}x normal volume on a down day.`;
+          return volumeTriggerText(alert, ticker, evidence);
         }
         if (ruleId === "T4") {
           return `${ticker} formed a higher swing low at ${formatNumber(evidence.swing_low_price)}. Suggested profit lock: ${formatNumber(evidence.proposed_profit_lock)}.`;
         }
         if (ruleId === "T5") {
-          return `${ticker} is down ${formatAbsPercent(evidence.drawdown_pct)} from entry: close ${formatNumber(evidence.close)} vs entry ${formatNumber(evidence.entry_price)}.`;
+          return drawdownTriggerText(alert, ticker, evidence);
         }
         if (ruleId === "T1" || ruleId === "A1" || ruleId === "C1") {
           return alertPlainEnglish(alert);
@@ -7175,6 +7408,9 @@
         if (isResolvedSetupChartAlert(alert)) {
           return "Historical alert only. No current action from this alert.";
         }
+        if (chartAlertStatusKey(alert) === "near") {
+          return nearTriggerRecommendedAction(alert);
+        }
         return alert?.recommended_action || ruleCopy(alertRuleId(alert)).recommended_action;
       }
 
@@ -7210,6 +7446,7 @@
             <span>Recommended Action</span>
             <strong>${escapeHtml(chartAlertRecommendedAction(alert))}</strong>
           </div>
+          ${profitLockRaiseActionMarkup(alert)}
         `;
       }
 
@@ -7280,6 +7517,9 @@
         if (isResolvedSetupChartAlert(marker)) {
           return { className: "info", label: "Resolved setup history" };
         }
+        if (chartAlertStatusKey(marker) === "near") {
+          return { className: "protect", label: "Near trigger watch" };
+        }
         const intent = ruleIntent(marker?.rule_id, marker?.category);
         if (["sell", "bearish", "protect", "setup", "info"].includes(intent.className)) {
           return intent;
@@ -7346,18 +7586,50 @@
         return symbols[intentClass] || "i";
       }
 
+      function chartMarkerActionSummary(marker) {
+        const rule = alertRuleId(marker) || marker?.rule_id || "";
+        const status = chartAlertStatusKey(marker);
+        if (isResolvedSetupChartAlert(marker)) {
+          return "No current action; this setup issue is resolved.";
+        }
+        if (status === "near") {
+          if (rule === "P1" || rule === "P2") {
+            const evidence = alertEvidence(marker);
+            const period = evidence.exit_ma_period || (rule === "P1" ? 150 : 50);
+            return `Wait for a confirmed close below SMA${period} before treating this as an exit.`;
+          }
+          if (rule === "P7") {
+            return "Watch for a 5x volume down day before treating this as distribution.";
+          }
+          if (rule === "T5") {
+            return "Check protection; treat it as a violation only after the 15% drawdown rule fires.";
+          }
+          return nearTriggerRecommendedAction(rule).replace(/^Prepare\.?\s*/i, "");
+        }
+        if (rule === "P1") {
+          return "Investor exit: review selling the full investor position.";
+        }
+        if (rule === "P2") {
+          return "Trader exit: review selling the full trader position.";
+        }
+        if (rule === "P7") {
+          return "Investigate heavy selling before adding.";
+        }
+        if (rule === "T5") {
+          return "Review protection immediately.";
+        }
+        return chartAlertRecommendedAction(marker);
+      }
+
       function chartMarkerTooltip(marker) {
         const intent = chartMarkerIntent(marker);
         const rule = marker?.rule_id || "Rule";
-        const title = chartAlertDisplayTitle(marker);
         const status = chartAlertStatusText(marker);
         const triggered = chartAlertTriggerText(marker);
-        const rationale = marker?.rule_rationale || marker?.what_triggered || RULE_COPY[rule]?.short_summary || "";
-        const action = chartAlertRecommendedAction(marker);
-        return `${ruleDisplayLabel(rule)} (${ruleReference(rule)}). ${title}. Meaning: ${intent.label}. Status: ${status}. Trigger: ${triggered}. Why: ${rationale}. Recommended action: ${action}`;
+        return `${ruleDisplayLabel(rule)} (${ruleReference(rule)}). ${intent.label}. Status: ${status}. ${triggered} Action: ${chartMarkerActionSummary(marker)}`;
       }
 
-      function wrapTooltipText(text, maxChars = 60, maxLines = 6) {
+      function wrapTooltipText(text, maxChars = 64) {
         const words = String(text || "").replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
         const lines = [];
         let current = "";
@@ -7374,17 +7646,12 @@
         if (current) {
           lines.push(current);
         }
-        if (lines.length > maxLines) {
-          const visible = lines.slice(0, maxLines);
-          visible[maxLines - 1] = `${visible[maxLines - 1].replace(/[. ]+$/, "")}...`;
-          return visible;
-        }
         return lines.length ? lines : ["No explanation available."];
       }
 
       function chartMarkerSvgTooltip(text, x, y, chartWidth, pad) {
         const lines = wrapTooltipText(text);
-        const boxWidth = 420;
+        const boxWidth = 520;
         const lineHeight = 22;
         const boxHeight = 24 + lines.length * lineHeight;
         const left = Math.max(pad.left + 4, Math.min(x + 16, chartWidth - pad.right - boxWidth - 4));
@@ -7432,6 +7699,9 @@
         }
         if (trigger.status === "active") {
           return { status: "active", label: "Action required", className: "active" };
+        }
+        if (trigger.status === "covered_by_primary_exit") {
+          return { status: "covered_by_primary_exit", label: "Covered by primary exit", className: "info" };
         }
         if (trigger.status === "blocker") {
           return { status: "blocker", label: "Setup needed", className: "setup" };
@@ -7769,7 +8039,7 @@
         }
         state.selectedTicker = ticker;
         try {
-          state.tickerDetail = await api(`/portfolios/${state.portfolioId}/tickers/${encodeURIComponent(ticker)}`);
+          state.tickerDetail = await fetchTickerDetail(ticker);
           renderAll();
           return true;
         } catch (error) {
@@ -7888,6 +8158,7 @@
                 <p><strong>Why this matters:</strong> ${escapeHtml(rulePlainEnglish(ruleId))}</p>
                 <p><strong>What you should do now:</strong> ${escapeHtml(alertRecommendedAction(alert))}</p>
                 ${setupAlert ? setupDataFieldsMarkup(ticker, alert.explanation.evidence || {}) : ""}
+                ${profitLockRaiseActionMarkup(alert)}
               </div>
               ${renderEvidenceDetails(alert.explanation.evidence, setupAlert ? "Show Setup Evidence" : "Show Trigger Evidence", { ruleId, ticker })}
             </div>
@@ -7908,6 +8179,7 @@
                 <p><strong>Why this matters:</strong> ${escapeHtml(ruleLedgerMeaning(row))}</p>
                 <p><strong>What you should do now:</strong> ${escapeHtml(row.action)}</p>
               </div>
+              ${profitLockRaiseActionMarkup(row)}
               ${row.trigger ? renderEvidenceDetails(row.trigger.evidence, "Show Trigger Evidence", { ruleId: row.subscription.rule_id, ticker }) : ""}
             </div>
           `;
@@ -8051,6 +8323,15 @@
             eyebrow: "Historical marker"
           };
         }
+        if (status === "covered_by_primary_exit") {
+          return {
+            cardClass: "history",
+            tone: "history",
+            symbol: "i",
+            label: "Covered by primary exit",
+            eyebrow: "Covered watch"
+          };
+        }
         if (isSetupIssueStatus(status)) {
           return {
             cardClass: "setup",
@@ -8103,6 +8384,7 @@
         const setupForm = row.status.status === "missing_setup"
           ? setupDataFieldsMarkup(state.selectedTicker || row.subscription.ticker, row.alert?.explanation?.evidence || row.trigger?.evidence || {})
           : "";
+        const profitLockForm = profitLockRaiseActionMarkup(row);
         return `
           <article class="rule-focus-card ${stateClass}">
             <header>
@@ -8132,6 +8414,7 @@
               <strong>${escapeHtml(row.action)}</strong>
             </div>
             ${setupForm}
+            ${profitLockForm}
             ${row.trigger ? renderEvidenceDetails(row.trigger.evidence, "Show Watch Evidence", { ruleId: row.subscription.rule_id }) : ""}
           </article>
         `;
@@ -8377,23 +8660,51 @@
         `;
       }
 
+      function alertTimelineEventLabel(event) {
+        const labels = {
+          created: "Alert created",
+          refreshed: "Alert still active",
+          resolved: "Alert resolved",
+          acknowledged: "Acknowledged",
+          notification_queued: "Notification queued",
+          notification_sent: "Notification sent",
+          notification_failed: "Notification failed"
+        };
+        return labels[event.kind] || String(event.kind || "Event").replace(/_/g, " ");
+      }
+
+      function alertTimelinePriceResponse(event, detail) {
+        const alerts = detail.chart_alerts || [];
+        const alert = alerts.find((item) => String(item.alert_id) === String(event.alert_id));
+        const bars = detail.bars || [];
+        const latest = bars[bars.length - 1];
+        const latestClose = latest ? toNumber(latest.adj_close || latest.close) : null;
+        const triggerDate = alert?.date || event.payload?.asof || null;
+        const triggerClose = triggerDate ? barCloseOnDate(bars, triggerDate) : null;
+        const evidenceClose = toNumber(alert?.evidence?.close);
+        const baseClose = triggerClose !== null ? triggerClose : evidenceClose;
+        const response = latestClose !== null && baseClose !== null ? latestClose / baseClose - 1 : null;
+        return `Price response since trigger: ${response === null ? "-" : formatPercent(response)}`;
+      }
+
       function renderAlertEventLog(detail) {
         const events = detail.alert_events || [];
         if (!events.length) {
-          return '<details class="trigger-history"><summary>Alert Event Log (0)</summary><div class="empty-state">No durable alert events have been recorded for this ticker yet.</div></details>';
+          return '<details class="trigger-history"><summary>Alert Timeline (0)</summary><div class="empty-state">No durable alert events have been recorded for this ticker yet. Price response since trigger: -</div></details>';
         }
         return `
           <details class="trigger-history">
-            <summary>Alert Event Log (${events.length})</summary>
+            <summary>Alert Timeline (${events.length})</summary>
             <div class="table-wrap">
               <table>
-                <thead><tr><th>Time</th><th>Rule</th><th>Event</th><th>Run</th></tr></thead>
+                <thead><tr><th>Time</th><th>Rule</th><th>Event</th><th>Price Response</th><th>Run</th></tr></thead>
                 <tbody>
                   ${events.map((event) => `
                     <tr>
                       <td>${escapeHtml(formatDateTime(event.occurred_at))}</td>
                       <td>${escapeHtml(ruleDisplayLabel(event.rule_id))}</td>
-                      <td>${escapeHtml(String(event.kind || "").replace(/_/g, " "))}</td>
+                      <td>${escapeHtml(alertTimelineEventLabel(event))}</td>
+                      <td>${escapeHtml(alertTimelinePriceResponse(event, detail))}</td>
                       <td>${escapeHtml(compactId(event.run_id || ""))}</td>
                     </tr>
                   `).join("")}
@@ -8428,6 +8739,9 @@
         });
         [...container.querySelectorAll("[data-use-suggested-stop]")].forEach((button) => {
           button.addEventListener("click", () => useSuggestedStop(button));
+        });
+        [...container.querySelectorAll("[data-use-profit-lock]")].forEach((button) => {
+          button.addEventListener("click", () => useProfitLockRecommendation(button));
         });
       }
 
@@ -9074,6 +9388,81 @@
         updateMetrics();
       }
 
+      function failedMassiveTickers() {
+        const qa = state.detail?.qa_summary || {};
+        if (qa.massive_failed_tickers?.length) {
+          return qa.massive_failed_tickers;
+        }
+        return (state.detail?.tickers || [])
+          .filter((ticker) => ticker.market_data_status?.last_attempt_source === "massive-stocks-aggregates")
+          .filter((ticker) => ticker.market_data_status?.last_attempt_status === "failed")
+          .map((ticker) => ticker.ticker);
+      }
+
+      async function retryFailedMassiveTickers() {
+        const failed = failedMassiveTickers();
+        if (!failed.length) {
+          log("No failed Massive symbols to retry.");
+          return;
+        }
+        if (!massiveReady()) {
+          const message = "Massive key is missing. Paste the key before retrying failed symbols.";
+          setRunStatus("error", "Massive key required", message);
+          log(message);
+          return;
+        }
+        try {
+          setRunStatus("working", "Retrying failed Massive symbols", `${plural(failed.length, "symbol")} will be retried without reloading the full portfolio.`);
+          await backfillMassiveForPortfolio({ failedOnly: true });
+          renderAll();
+          setRunStatus("done", "Failed Massive retry complete", "Portfolio QA has been refreshed with the latest market-data status.");
+        } catch (error) {
+          setRunStatus("error", "Failed Massive retry stopped", error.message);
+          log(error.message);
+        }
+      }
+
+      function renderPortfolioQaPanel() {
+        const panel = $("portfolioQaPanel");
+        if (!panel) {
+          return;
+        }
+        const qa = state.detail?.qa_summary;
+        if (!state.portfolioId) {
+          panel.innerHTML = '<section class="section"><div class="empty-state">Create or select a portfolio before running the Portfolio QA Checklist.</div></section>';
+          return;
+        }
+        if (!qa) {
+          panel.innerHTML = '<section class="section"><div class="empty-state">Portfolio QA Checklist will appear after the portfolio loads.</div></section>';
+          return;
+        }
+        const failed = failedMassiveTickers();
+        const nextSteps = qa.next_steps || [];
+        panel.innerHTML = `
+          <section class="section">
+            <div class="section-header">
+              <h3>Portfolio QA Checklist</h3>
+              <div class="actions">
+                ${failed.length ? '<button class="risk" data-retry-failed-massive>Retry Failed Massive Symbols</button>' : ""}
+              </div>
+            </div>
+            <div class="portfolio-qa-grid">
+              <div class="overview-card"><span>Tickers</span><strong>${formatValue(qa.ticker_count)}</strong></div>
+              <div class="overview-card"><span>Market Data Ready</span><strong>${formatValue(qa.market_data_ticker_count)} / ${formatValue(qa.ticker_count)}</strong></div>
+              <div class="overview-card"><span>Massive Failed</span><strong class="${qa.massive_failed_count ? "negative" : "positive"}">${formatValue(qa.massive_failed_count)}</strong></div>
+              <div class="overview-card"><span>Setup Needed</span><strong>${formatValue(qa.setup_needed_count)}</strong></div>
+              <div class="overview-card"><span>Near Trigger</span><strong>${formatValue(qa.near_trigger_count)}</strong></div>
+            </div>
+            <div class="portfolio-qa-steps">
+              ${nextSteps.map((step) => `<span>${escapeHtml(step)}</span>`).join("")}
+            </div>
+          </section>
+        `;
+        [...panel.querySelectorAll("[data-retry-failed-massive]")].forEach((button) => {
+          button.addEventListener("click", retryFailedMassiveTickers);
+        });
+      }
+
       function renderOverviewDisplay() {
         const summary = state.detail?.summary || {};
         const receipt = state.lastRunReceipt;
@@ -9225,6 +9614,7 @@
         renderSidebarNav();
         renderActiveDisplay();
         renderOverviewDisplay();
+        renderPortfolioQaPanel();
         renderImportDisplay();
         renderHoldingsDisplay();
         renderAlertQueueDisplay();
@@ -9250,6 +9640,8 @@
 
       async function initializeApp() {
         document.body.dataset.pageMode = state.pageMode;
+        await refreshMarketDataConfig();
+        renderAll();
         await loadPortfolios();
         if (state.routeTicker) {
           state.selectedTicker = state.routeTicker;
@@ -9314,21 +9706,26 @@
         return payload;
       }
 
-      async function backfillMassiveForPortfolio() {
+      async function backfillMassiveForPortfolio({ failedOnly = false } = {}) {
         requirePortfolio();
-        const body = { end: $("asofDate").value || todayIso(), lookback: 250 };
+        const body = { end: $("asofDate").value || todayIso(), lookback: 250, ...(failedOnly ? { failed_only: true } : {}) };
         const apiKey = massiveApiKey();
         if (apiKey) {
           body.api_key = apiKey;
           body.timeout_seconds = 8;
         }
-        setRunStatus("working", "Loading Massive bars", "Fetching real daily bars. This can take a moment on large portfolios.");
+        setRunStatus("working", failedOnly ? "Retrying failed Massive bars" : "Loading Massive bars", failedOnly ? "Only symbols with a failed Massive attempt will be retried." : "Fetching real daily bars. This can take a moment on large portfolios.");
         const payload = await api(`/portfolios/${state.portfolioId}/backfill-massive`, {
           method: "POST",
           body
         });
-        state.lastBackfill = { updated: payload.updated, end: $("asofDate").value, source: payload.source };
+        state.lastBackfill = { updated: payload.updated, end: $("asofDate").value, source: payload.source, mode: payload.mode };
         if (!payload.updated.length) {
+          if (failedOnly && !payload.selected?.length) {
+            await refreshPortfolioState();
+            log("No failed Massive symbols were available to retry.");
+            return payload;
+          }
           const failedText = payload.failed.length
             ? payload.failed.slice(0, 5).map((item) => `${item.ticker} (${item.error})`).join("; ")
             : "No bars returned.";
@@ -9363,7 +9760,7 @@
       }
 
       async function loadPrimaryMarketDataForPortfolio() {
-        if (!massiveApiKey()) {
+        if (!massiveReady()) {
           const message = "Massive key is missing. Paste the key before running the monitor.";
           log(message);
           setRunStatus("error", "Massive key required", "Save Portfolio & Run Monitor requires Massive data. Online fallback is available only from Advanced manual controls.");
@@ -9480,6 +9877,17 @@
         log("Suggested stop copied into the setup field. Review it, then save setup data.");
       }
 
+      function useProfitLockRecommendation(button) {
+        const form = button.closest("[data-setup-form]");
+        const input = form?.querySelector('[data-setup-field="current_profit_lock"]');
+        if (!input) {
+          return;
+        }
+        input.value = button.dataset.useProfitLock || "";
+        input.focus();
+        log("Recommended profit lock copied into the setup field. Review it, then save profit lock.");
+      }
+
       async function saveTickerSetupData(ticker, button) {
         try {
           requirePortfolio();
@@ -9531,7 +9939,7 @@
           state.chartWindowOffset = 0;
           renderTickerDetail();
           renderStockSnapshot();
-          state.tickerDetail = await api(`/portfolios/${state.portfolioId}/tickers/${encodeURIComponent(ticker)}`);
+          state.tickerDetail = await fetchTickerDetail(ticker);
           renderTickerDetail();
           renderStockSnapshot();
           log(`${ticker} detail loaded with ${state.tickerDetail.bars.length} bar(s) and ${state.tickerDetail.chart_alerts.length} chart marker(s).`);

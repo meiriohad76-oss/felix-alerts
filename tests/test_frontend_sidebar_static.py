@@ -169,6 +169,47 @@ class FrontendSidebarStaticTests(unittest.TestCase):
         self.assertIn('setRunStatus("working", "Using loaded file"', html)
         self.assertIn("!fileAlreadyLoaded", html)
 
+    def test_server_massive_key_allows_monitor_without_browser_key(self):
+        html = self.read_sidebar()
+        self.assertIn("marketDataConfig", html)
+        self.assertIn("function refreshMarketDataConfig", html)
+        self.assertIn("/market-data/config", html)
+        self.assertIn("function serverMassiveConfigured", html)
+        self.assertIn("function massiveReady", html)
+        self.assertIn("Massive key configured on server", html)
+        self.assertIn("Server-side Massive key is configured", html)
+        self.assertIn("if (!massiveReady())", html)
+        self.assertNotIn('if (!massiveApiKey()) {\n          const message = "Massive key is missing.', html)
+
+    def test_near_moving_average_marker_uses_above_and_prepare_copy(self):
+        html = self.read_sidebar()
+        self.assertIn("function movingAverageTriggerText", html)
+        self.assertIn('const relation = close < exitMa ? "below" : "above";', html)
+        self.assertIn('if (chartAlertStatusKey(marker) === "near")', html)
+        self.assertIn("Prepare. Review the position and wait for a confirmed close below the moving average before treating this as an exit.", html)
+        self.assertIn('return { className: "protect", label: "Near trigger watch" };', html)
+
+    def test_near_volume_and_drawdown_markers_do_not_use_triggered_copy(self):
+        html = self.read_sidebar()
+        self.assertIn("function volumeTriggerText", html)
+        self.assertIn('const dayDirection = close !== null && open !== null ? (close < open ? "down day" : close > open ? "up day" : "flat day") : "day";', html)
+        self.assertIn("This is elevated volume, not the full 5x down-day distribution trigger.", html)
+        self.assertIn("function drawdownTriggerText", html)
+        self.assertIn("This is near the 15% loss-limit watch, not a confirmed violation.", html)
+        self.assertIn("function nearTriggerRecommendedAction", html)
+        self.assertIn("Prepare. Watch for a 5x volume down day before treating this as distribution.", html)
+        self.assertIn("Prepare. Check protection and wait for a 15% drawdown breach before treating this as a recovery violation.", html)
+        self.assertIn('if (rawStatus.includes("not triggered"))', html)
+
+    def test_t5_clear_and_primary_exit_covered_copy_is_not_violation_copy(self):
+        html = self.read_sidebar()
+        self.assertIn("covered_by_primary_exit", html)
+        self.assertIn("function rowStateAwarePlainEnglish", html)
+        self.assertIn('if (row.status.status === "covered_by_primary_exit")', html)
+        self.assertIn("This 15% loss-limit watch is covered by the active primary exit signal.", html)
+        self.assertIn("No T5 action is needed while there is buffer.", html)
+        self.assertIn("Covered by primary exit", html)
+
     def test_overview_urgency_sort_uses_context_rows(self):
         html = self.read_sidebar()
         self.assertIn("sortTickerRowsByUrgency(tableRowsForCurrentContext().rows)", html)
@@ -289,9 +330,13 @@ class FrontendSidebarStaticTests(unittest.TestCase):
         self.assertIn("chartMarkerVisibleOnPriceChart(marker, ticker)", html)
         self.assertIn("function markerClusterOffset", html)
         self.assertIn("marker-lane", html)
-        self.assertIn("const boxWidth = 420", html)
+        self.assertIn("const boxWidth = 520", html)
         self.assertIn("font-size: 16px", html)
         self.assertIn("line-height: 22px", html)
+        self.assertIn("fill-opacity: 0.96", html)
+        self.assertIn("function chartMarkerActionSummary", html)
+        self.assertIn("Action: ${chartMarkerActionSummary(marker)}", html)
+        self.assertNotIn('visible[maxLines - 1] = `${visible[maxLines - 1].replace(/[. ]+$/, "")}...`;', html)
         self.assertIn("const markerLaneCount = 6", html)
         self.assertIn("xOffset: column * 38", html)
         self.assertIn("yOffset: lane * 42", html)
@@ -320,6 +365,20 @@ class FrontendSidebarStaticTests(unittest.TestCase):
         self.assertIn("receipt.alerts_resolved_count", html)
         self.assertIn("function renderAlertEventLog", html)
         self.assertIn("detail.alert_events || []", html)
+        self.assertIn("Alert Timeline", html)
+        self.assertIn("function alertTimelineEventLabel", html)
+        self.assertIn("Price response since trigger", html)
+
+    def test_overview_has_portfolio_qa_panel_and_failed_massive_retry(self):
+        html = self.read_sidebar()
+        self.assertIn('id="portfolioQaPanel"', html)
+        self.assertIn("function renderPortfolioQaPanel", html)
+        self.assertIn("Portfolio QA Checklist", html)
+        self.assertIn("qa_summary", html)
+        self.assertIn("Retry Failed Massive Symbols", html)
+        self.assertIn("function failedMassiveTickers", html)
+        self.assertIn("function retryFailedMassiveTickers", html)
+        self.assertIn('failed_only: true', html)
 
     def test_settings_display_supports_email_and_telegram_notification_settings(self):
         html = self.read_sidebar()
@@ -351,6 +410,15 @@ class FrontendSidebarStaticTests(unittest.TestCase):
         self.assertIn("data-save-setup", html)
         self.assertIn("renderMissingStopSetupPanel(detail.ticker", html)
         self.assertIn("renderMissingStopSetupPanel(ticker", html)
+
+    def test_profit_lock_raise_action_can_save_recommended_level(self):
+        html = self.read_sidebar()
+        self.assertIn("function profitLockRaiseActionMarkup", html)
+        self.assertIn("Use recommended profit lock", html)
+        self.assertIn("proposed_profit_lock", html)
+        self.assertIn("data-use-profit-lock", html)
+        self.assertIn("profitLockRaiseActionMarkup(row)", html)
+        self.assertIn("profitLockRaiseActionMarkup(alert)", html)
 
     def test_setup_save_uses_backend_lifecycle_response_without_second_evaluate(self):
         html = self.read_sidebar()

@@ -16,6 +16,7 @@ from uuid import UUID
 
 from sentinel_core.http_api import create_server
 from sentinel_core.market_data import InMemoryMarketDataProvider
+from sentinel_core.sqlite_store import SQLiteStore
 from tests.bar_fixtures import p1_cross_below_sma150_bars
 from tests.test_xlsx_import import write_minimal_xlsx
 
@@ -66,6 +67,21 @@ def raw_request(server, method, path):
 
 
 class HttpApiTests(unittest.TestCase):
+    def test_market_data_config_reports_server_massive_key_without_leaking_secret(self):
+        with patch.dict(os.environ, {"MASSIVE_API_KEY": "real-secret-value"}, clear=False):
+            server = create_server(db_path=":memory:", port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, data = request(server, "GET", "/market-data/config")
+                self.assertEqual(status, 200)
+                self.assertTrue(data["massive_configured"])
+                self.assertEqual(data["massive_key_source"], "server_env")
+                self.assertNotIn("real-secret-value", json.dumps(data))
+            finally:
+                server.shutdown()
+                server.server_close()
+
     def test_macos_proxy_detection_retries_unstable_wpad_pac(self):
         from sentinel_core import http_api
 
@@ -191,6 +207,38 @@ class HttpApiTests(unittest.TestCase):
                 self.assertEqual(status, 200)
                 self.assertEqual(body, "<html>sidebar ui</html>")
                 self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_head_health_returns_headers_without_body(self):
+        server = create_server(db_path=":memory:", port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, headers, body = raw_request(server, "HEAD", "/health")
+            self.assertEqual(status, 200)
+            self.assertEqual(body, "")
+            self.assertEqual(headers["content-type"], "application/json; charset=utf-8")
+            self.assertGreater(int(headers["content-length"]), 0)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_head_static_root_returns_headers_without_body(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "index.html").write_text("<html>legacy ui</html>")
+            Path(tmp, "sidebar.html").write_text("<html>fresh sidebar ui</html>")
+            server = create_server(db_path=":memory:", port=0, static_dir=tmp)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, headers, body = raw_request(server, "HEAD", "/")
+                self.assertEqual(status, 200)
+                self.assertEqual(body, "")
+                self.assertEqual(headers["content-type"], "text/html; charset=utf-8")
+                self.assertEqual(headers["cache-control"], "no-store, max-age=0")
+                self.assertGreater(int(headers["content-length"]), 0)
             finally:
                 server.shutdown()
                 server.server_close()
@@ -342,6 +390,50 @@ class HttpApiTests(unittest.TestCase):
             self.assertNotEqual(aapl_scores["rank"], aaoi_scores["rank"])
             self.assertIn("reason", aapl_scores)
             self.assertIn("components", aapl_scores)
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_t5_watch_is_covered_when_primary_exit_is_active(self):
+        server = create_server(db_path=":memory:", port=0)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            status, data = request(server, "POST", "/portfolios", {"name": "AEM Regression"})
+            self.assertEqual(status, 201)
+            portfolio_id = data["portfolio"]["portfolio_id"]
+            status, _ = request(
+                server,
+                "POST",
+                "/portfolios/%s/import" % portfolio_id,
+                {"csv_text": "ticker,type,shares,entry_price,current_profit_lock\nAEM,investor,10,110,95\n"},
+            )
+            self.assertEqual(status, 200)
+            workspace = server.RequestHandlerClass.api.workspace
+            workspace.backfill_market_data(
+                portfolio_id=UUID(portfolio_id),
+                provider=InMemoryMarketDataProvider.from_items([("AEM", p1_cross_below_sma150_bars())]),
+                end=date(2025, 5, 31),
+            )
+
+            status, data = request(server, "GET", "/portfolios/%s/tickers/AEM" % portfolio_id)
+
+            self.assertEqual(status, 200)
+            triggers = {trigger["rule_id"]: trigger for trigger in data["potential_triggers"]}
+            self.assertIn(triggers["P1"]["status"], {"active", "triggered"})
+            self.assertEqual(triggers["T5"]["status"], "covered_by_primary_exit")
+            self.assertEqual(triggers["T5"]["evidence"]["primary_exit_rule_id"], "P1")
+
+            status, data = request(server, "GET", "/portfolios/%s" % portfolio_id)
+            self.assertEqual(status, 200)
+            row = [item for item in data["tickers"] if item["ticker"] == "AEM"][0]
+            active_rules = {
+                item["rule_id"]
+                for item in row["trigger_summary"]["proximity_items"]
+                if item["status"] in {"triggered", "active"}
+            }
+            self.assertEqual(active_rules, {"P1"})
+            self.assertEqual(row["trigger_summary"]["action_count"], 1)
         finally:
             server.shutdown()
             server.server_close()
@@ -885,6 +977,110 @@ class HttpApiTests(unittest.TestCase):
         finally:
             server.shutdown()
             server.server_close()
+
+    def test_portfolio_detail_includes_qa_summary_and_failed_massive_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "sentinel.sqlite3"
+            server = create_server(db_path=db_path, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, data = request(server, "POST", "/portfolios", {"name": "QA Portfolio"})
+                self.assertEqual(status, 201)
+                portfolio_id = data["portfolio"]["portfolio_id"]
+                status, data = request(
+                    server,
+                    "POST",
+                    "/portfolios/%s/import" % portfolio_id,
+                    {"csv_text": "ticker,type,shares,entry_price,current_profit_lock\nAAPL,investor,10,110,\nMSFT,investor,5,300,280\n"},
+                )
+                self.assertEqual(status, 200)
+
+                setup_store = SQLiteStore(db_path)
+                setup_store.record_market_data_failure(
+                    "AAPL",
+                    source="massive-stocks-aggregates",
+                    source_label="Massive Stocks Aggregates",
+                    error="timeout",
+                )
+                setup_store.conn.close()
+                status, data = request(server, "GET", "/portfolios/%s" % portfolio_id)
+
+                self.assertEqual(status, 200)
+                qa = data["qa_summary"]
+                self.assertEqual(qa["portfolio_name"], "QA Portfolio")
+                self.assertEqual(qa["ticker_count"], 2)
+                self.assertEqual(qa["massive_failed_count"], 1)
+                self.assertEqual(qa["no_market_data_count"], 2)
+                self.assertGreaterEqual(qa["setup_needed_count"], 1)
+                self.assertIn("Retry failed Massive symbols", qa["next_steps"])
+                self.assertIn("Enter missing stop/profit-lock setup data", qa["next_steps"])
+            finally:
+                server.shutdown()
+                server.server_close()
+
+    def test_massive_backfill_failed_only_retries_only_failed_tickers(self):
+        class FakeMassiveProvider:
+            calls = []
+
+            def __init__(self, api_key, timeout_seconds=15, proxy_url=None):
+                self.api_key = api_key
+                self.timeout_seconds = timeout_seconds
+                self.proxy_url = proxy_url
+                self.base_url = "https://api.massive.com"
+
+            def validate_symbol(self, ticker):
+                return True
+
+            def get_bars(self, ticker, *, end, lookback):
+                self.calls.append(ticker)
+                return p1_cross_below_sma150_bars()[-5:]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "sentinel.sqlite3"
+            server = create_server(db_path=db_path, port=0)
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            try:
+                status, data = request(server, "POST", "/portfolios", {"name": "Retry Portfolio"})
+                self.assertEqual(status, 201)
+                portfolio_id = data["portfolio"]["portfolio_id"]
+                status, data = request(
+                    server,
+                    "POST",
+                    "/portfolios/%s/import" % portfolio_id,
+                    {"csv_text": "ticker,type,shares,entry_price,current_profit_lock\nAAPL,investor,10,110,95\nMSFT,investor,5,300,280\n"},
+                )
+                self.assertEqual(status, 200)
+
+                setup_store = SQLiteStore(db_path)
+                setup_store.record_market_data_failure(
+                    "AAPL",
+                    source="massive-stocks-aggregates",
+                    source_label="Massive Stocks Aggregates",
+                    error="timeout",
+                )
+                setup_store.conn.close()
+
+                with patch("sentinel_core.http_api.MassiveMarketDataProvider", FakeMassiveProvider), patch(
+                    "sentinel_core.http_api._https_connectivity_error_with_proxy_retry",
+                    return_value=(None, None),
+                ), patch("sentinel_core.http_api._detect_proxy_url", return_value=None):
+                    status, data = request(
+                        server,
+                        "POST",
+                        "/portfolios/%s/backfill-massive" % portfolio_id,
+                        {"api_key": "secret", "end": "2025-05-31", "failed_only": True},
+                    )
+
+                self.assertEqual(status, 200)
+                self.assertEqual(data["mode"], "failed_only")
+                self.assertEqual(data["selected"], ["AAPL"])
+                self.assertEqual(data["updated"], ["AAPL"])
+                self.assertEqual(FakeMassiveProvider.calls, ["AAPL"])
+            finally:
+                server.shutdown()
+                server.server_close()
 
     def test_chart_scenario_route_is_not_exposed(self):
         server = create_server(db_path=":memory:", port=0)

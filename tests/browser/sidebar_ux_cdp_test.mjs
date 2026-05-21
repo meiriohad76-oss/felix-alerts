@@ -195,7 +195,17 @@ async function waitForEvaluation(client, description, expression, timeoutMs = 12
     }
     await sleep(180);
   }
-  throw new Error(`Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}`);
+  const pageState = await evaluate(client, `(() => ({
+    href: location.href,
+    ready: document.readyState,
+    activeDisplay: document.body?.dataset?.activeDisplay || "",
+    title: document.querySelector("#tickerDetailTitle")?.textContent || "",
+    badge: document.querySelector("#tickerDetailBadge")?.textContent || "",
+    hasChartSvg: Boolean(document.querySelector(".chart-svg")),
+    markerCount: document.querySelectorAll(".chart-marker-group").length,
+    bodyStart: document.body?.innerText?.slice(0, 800) || ""
+  }))()`);
+  throw new Error(`Timed out waiting for ${description}. Last value: ${JSON.stringify(lastValue)}. Page state: ${JSON.stringify(pageState)}`);
 }
 
 async function navigate(client, url) {
@@ -266,7 +276,15 @@ async function runBrowserChecks({ baseUrl, portfolioId, ticker }) {
     );
 
     const stockUrl = `${baseUrl}/?view=stock&portfolio=${encodeURIComponent(portfolioId)}&ticker=${encodeURIComponent(ticker)}`;
-    await navigate(client, stockUrl);
+    const clickedTickerLink = await evaluate(client, `(() => {
+      const link = [...document.querySelectorAll("a.ticker-button")]
+        .find((candidate) => candidate.href === ${jsString(stockUrl)});
+      if (!link) return false;
+      link.click();
+      return true;
+    })()`);
+    assert(clickedTickerLink, "Holdings view must expose a clickable ticker detail link for the selected ticker.");
+    await waitForEvaluation(client, "stock route after ticker click", `location.href === ${jsString(stockUrl)} && document.body.dataset.activeDisplay === "stock"`);
     const chartState = await waitForEvaluation(client, "stock detail chart rendering", `(() => {
       const svg = document.querySelector(".chart-svg");
       const markers = [...document.querySelectorAll(".chart-marker-group")];
@@ -281,7 +299,7 @@ async function runBrowserChecks({ baseUrl, portfolioId, ticker }) {
             kpiText
           }
         : null;
-    })()`);
+    })()`, 20000);
     assert(chartState.preserveAspectRatio === "xMidYMid meet", "Chart SVG must preserve aspect ratio instead of stretching.");
     assert(chartState.kpiText.includes("Volume") || document.body.innerText.includes("Volume"), "Stock chart must expose volume context.");
 
@@ -378,6 +396,7 @@ async function runBrowserChecks({ baseUrl, portfolioId, ticker }) {
       const tooltipRect = tooltip?.querySelector("rect");
       const tooltipStyle = tooltip ? getComputedStyle(tooltip) : null;
       const tooltipTextStyle = tooltipText ? getComputedStyle(tooltipText) : null;
+      const tooltipRectStyle = tooltipRect ? getComputedStyle(tooltipRect) : null;
       const tooltipBox = tooltipRect?.getBBox();
       const uniqueY = new Set(shapeRects.map((rect) => Math.round(rect.y)));
       const firstShape = groups[0].querySelector(".chart-marker-shape");
@@ -394,7 +413,9 @@ async function runBrowserChecks({ baseUrl, portfolioId, ticker }) {
         hoverElement: hoverElement?.getAttribute("class") || hoverElement?.tagName || "",
         hoveredTooltipOpacity: tooltipStyle ? parseFloat(tooltipStyle.opacity) : 0,
         tooltipFontSize: tooltipTextStyle ? parseFloat(tooltipTextStyle.fontSize) : 0,
-        tooltipBoxWidth: tooltipBox?.width || 0
+        tooltipBoxWidth: tooltipBox?.width || 0,
+        tooltipBackgroundOpacity: tooltipRectStyle ? parseFloat(tooltipRectStyle.fillOpacity) : 0,
+        tooltipText: tooltip?.textContent || ""
       };
     })()`);
     assert(markerMetrics.count >= 3, `Expected at least 3 chart markers; got ${markerMetrics.count}`);
@@ -403,7 +424,9 @@ async function runBrowserChecks({ baseUrl, portfolioId, ticker }) {
     assert(markerMetrics.shapeRects.every((rect) => rect.index !== null && rect.aria.length > 80), "Every chart marker needs index metadata and an explanatory aria label.");
     assert(markerMetrics.hoveredTooltipOpacity >= 0.95, `Hovered SVG marker tooltip should become visible: ${JSON.stringify(markerMetrics)}`);
     assert(markerMetrics.tooltipFontSize >= 16, `SVG marker tooltip font is too small: ${markerMetrics.tooltipFontSize}`);
-    assert(markerMetrics.tooltipBoxWidth >= 400, `SVG marker tooltip box is too narrow: ${markerMetrics.tooltipBoxWidth}`);
+    assert(markerMetrics.tooltipBoxWidth >= 500, `SVG marker tooltip box is too narrow: ${markerMetrics.tooltipBoxWidth}`);
+    assert(markerMetrics.tooltipBackgroundOpacity >= 0.9, `SVG marker tooltip background is too transparent: ${JSON.stringify(markerMetrics)}`);
+    assert(!markerMetrics.tooltipText.includes("..."), `SVG marker tooltip text should not be truncated: ${markerMetrics.tooltipText}`);
 
     const result = {
       holdings: holdingsState,

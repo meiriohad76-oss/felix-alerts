@@ -21,7 +21,7 @@ chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}" "${DATA_DIR}" "${LOG_DIR
 chmod 750 "${DATA_DIR}" "${LOG_DIR}"
 
 apt-get update
-apt-get install -y python3 python3-venv python3-pip
+apt-get install -y python3 python3-venv python3-pip sqlite3
 
 python3 -m venv "${APP_DIR}/.venv"
 "${APP_DIR}/.venv/bin/python" -m pip install --upgrade pip
