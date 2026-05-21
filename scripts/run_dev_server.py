@@ -73,6 +73,17 @@ def run_server(*, host: str, port: int, db_path: Path, static_dir: Path) -> None
 
 
 def process_is_running(pid: int) -> bool:
+    if os.name == "nt":
+        try:
+            completed = subprocess.run(
+                ["tasklist", "/FI", "PID eq %s" % pid, "/FO", "CSV", "/NH"],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False
+        return str(pid) in completed.stdout
     try:
         os.kill(pid, 0)
     except OSError:

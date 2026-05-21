@@ -427,12 +427,20 @@ class SQLiteStore:
         else:
             self.conn = sqlite3.connect(str(path), check_same_thread=False)
         self._lock = threading.RLock()
+        self._closed = False
         self.conn.row_factory = sqlite3.Row
         self.init_schema()
 
     @classmethod
     def in_memory(cls) -> "SQLiteStore":
         return cls(sqlite3.connect(":memory:", check_same_thread=False))
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self.conn.close()
+            self._closed = True
 
     def init_schema(self) -> None:
         with self._lock:

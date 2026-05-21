@@ -72,6 +72,25 @@ class NoResidueTests(unittest.TestCase):
         self.assertNotIn("sentinel_dev.sqlite3", completed.stdout)
         self.assertNotIn(".sentinel_dev_server.pid", completed.stdout)
 
+    def test_upload_package_validator_rejects_os_metadata_files(self):
+        script = ROOT / "scripts" / "validate_upload_package.py"
+        metadata_file = ROOT / "fixtures" / "._validator_probe.json"
+        metadata_file.write_text("metadata", encoding="utf-8")
+        try:
+            completed = subprocess.run(
+                [sys.executable, str(script)],
+                cwd=ROOT,
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        finally:
+            metadata_file.unlink(missing_ok=True)
+
+        self.assertNotEqual(completed.returncode, 0, completed.stdout + completed.stderr)
+        self.assertIn("OS metadata files found", completed.stderr)
+        self.assertIn("fixtures", completed.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()

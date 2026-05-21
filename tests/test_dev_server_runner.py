@@ -29,11 +29,7 @@ def unused_port() -> int:
 
 
 def process_is_running(pid: int) -> bool:
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
+    return run_dev_server.process_is_running(pid)
 
 
 def wait_for_health(port: int, timeout: float = 5.0) -> None:

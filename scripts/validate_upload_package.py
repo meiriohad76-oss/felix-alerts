@@ -25,7 +25,9 @@ IGNORED_PARTS = {
     "venv",
     "node_modules",
     ".git",
+    ".superpowers",
 }
+OS_METADATA_PREFIXES = ("._",)
 SECRET_PATTERNS = [
     re.compile(r"MASSIVE_API_KEY=(?!replace_|\\.\\.\\.)\\S+", re.IGNORECASE),
     re.compile(r"SENTINEL_EMAIL_PASSWORD=(?!replace_|\\.\\.\\.)\\S+", re.IGNORECASE),
@@ -37,6 +39,10 @@ SECRET_PATTERNS = [
 def should_skip(path: Path) -> bool:
     parts = set(path.relative_to(ROOT).parts)
     return bool(parts & IGNORED_PARTS)
+
+
+def is_os_metadata(path: Path) -> bool:
+    return path.name.startswith(OS_METADATA_PREFIXES)
 
 
 def upload_files() -> list[Path]:
@@ -56,6 +62,16 @@ def upload_files() -> list[Path]:
                 continue
             files.append(path)
     return sorted(set(files))
+
+
+def find_os_metadata_files() -> list[Path]:
+    offenders = []
+    for path in ROOT.rglob("*"):
+        if not path.is_file() or should_skip(path):
+            continue
+        if is_os_metadata(path):
+            offenders.append(path)
+    return sorted(offenders)
 
 
 def find_runtime_files() -> list[Path]:
@@ -82,6 +98,13 @@ def scan_secrets(files: list[Path]) -> list[str]:
 
 def main() -> int:
     files = upload_files()
+    os_metadata = find_os_metadata_files()
+    if os_metadata:
+        print("Upload package validation failed: OS metadata files found.", file=sys.stderr)
+        for path in os_metadata:
+            print(path.relative_to(ROOT), file=sys.stderr)
+        return 1
+
     findings = scan_secrets(files)
     if findings:
         print("Upload package validation failed: possible secrets found.", file=sys.stderr)

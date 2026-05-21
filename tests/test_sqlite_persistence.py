@@ -106,9 +106,12 @@ class SQLiteStoreTests(unittest.TestCase):
             store.conn.close()
 
             reopened = SQLiteStore(db_path)
-            self.assertEqual(reopened.get_portfolio(portfolio.portfolio_id).name, "Core")
-            self.assertEqual(reopened.list_tickers(portfolio.portfolio_id)[0].ticker, "AAPL")
-            self.assertIn("P1", [item.rule_id for item in reopened.list_subscriptions(portfolio.portfolio_id)])
+            try:
+                self.assertEqual(reopened.get_portfolio(portfolio.portfolio_id).name, "Core")
+                self.assertEqual(reopened.list_tickers(portfolio.portfolio_id)[0].ticker, "AAPL")
+                self.assertIn("P1", [item.rule_id for item in reopened.list_subscriptions(portfolio.portfolio_id)])
+            finally:
+                reopened.close()
 
     def test_persistent_evaluate_ack_report_flow(self):
         user_id = uuid4()

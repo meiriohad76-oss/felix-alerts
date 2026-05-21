@@ -1453,6 +1453,16 @@ def make_handler(api: SentinelApi, static_dir: Optional[Path] = None):
     return Handler
 
 
+class SentinelHTTPServer(ThreadingHTTPServer):
+    def server_close(self) -> None:
+        try:
+            api = getattr(self.RequestHandlerClass, "api", None)
+            if api is not None:
+                api.workspace.store.close()
+        finally:
+            super().server_close()
+
+
 def create_server(
     *,
     db_path: str | Path,
@@ -1463,4 +1473,4 @@ def create_server(
     store = SQLiteStore(db_path)
     api = SentinelApi(PersistentSentinelWorkspace(store))
     handler = make_handler(api, Path(static_dir) if static_dir else None)
-    return ThreadingHTTPServer((host, port), handler)
+    return SentinelHTTPServer((host, port), handler)

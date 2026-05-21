@@ -31,6 +31,7 @@ test-results/
 
 # OS/editor metadata
 .DS_Store
+._*
 .idea/
 .vscode/
 *.swp
