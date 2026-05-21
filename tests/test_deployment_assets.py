@@ -20,10 +20,12 @@ class DeploymentAssetTests(unittest.TestCase):
         self.assertIn("Do not expose port 8765 directly on the LAN", deployment_doc)
 
     def test_raspberry_pi_backup_and_restore_scripts_are_present(self):
+        install = (ROOT / "deploy" / "raspberry-pi" / "install.sh").read_text()
         backup = (ROOT / "deploy" / "raspberry-pi" / "backup_database.sh").read_text()
         restore = (ROOT / "deploy" / "raspberry-pi" / "restore_database.sh").read_text()
         deployment_doc = (ROOT / "docs" / "DEPLOYMENT.md").read_text()
 
+        self.assertIn("chmod 0755 \"${APP_DIR}\"/deploy/raspberry-pi/*.sh", install)
         self.assertIn("set -euo pipefail", backup)
         self.assertIn("sqlite3 \"$DB_PATH\" \".backup '$BACKUP_PATH'\"", backup)
         self.assertIn("find \"$BACKUP_DIR\" -name 'sentinel-*.sqlite3' -type f -mtime +\"$RETENTION_DAYS\" -delete", backup)

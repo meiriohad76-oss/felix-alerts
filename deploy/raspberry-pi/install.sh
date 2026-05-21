@@ -19,6 +19,7 @@ fi
 mkdir -p "${APP_DIR}" "${ENV_DIR}" "${DATA_DIR}" "${LOG_DIR}"
 chown -R "${SERVICE_USER}:${SERVICE_USER}" "${APP_DIR}" "${DATA_DIR}" "${LOG_DIR}"
 chmod 750 "${DATA_DIR}" "${LOG_DIR}"
+chmod 0755 "${APP_DIR}"/deploy/raspberry-pi/*.sh
 
 apt-get update
 apt-get install -y python3 python3-venv python3-pip sqlite3
