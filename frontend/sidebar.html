@@ -5185,8 +5185,30 @@
         return toNumber(evidence.suggested_stop) !== null;
       }
 
+      function setupStopHasInsufficientHistory(evidence = {}) {
+        return evidence.stop_suggestion_status === "insufficient_history";
+      }
+
+      function setupStopUsesLimitedHistory(evidence = {}) {
+        return evidence.stop_suggestion_status === "limited_history";
+      }
+
       function setupStopRecommendationReason(evidence = {}) {
-        return evidence.stop_suggestion_reason || evidence.suggestion_reason || "Recommendation unavailable until Massive data is loaded for this ticker.";
+        if (setupStopUsesLimitedHistory(evidence) && evidence.bars_available !== undefined && evidence.bars_required !== undefined) {
+          return `Sentinel is using the available price history for now: ${formatValue(evidence.bars_available)} of ${formatValue(evidence.bars_required)} daily bars. Review the suggested stop before saving it.`;
+        }
+        if (setupStopHasInsufficientHistory(evidence) && evidence.bars_available !== undefined && evidence.bars_required !== undefined) {
+          const label = evidence.exit_ma_label || `SMA${formatValue(evidence.exit_ma_period || evidence.bars_required)}`;
+          return `Only ${formatValue(evidence.bars_available)} of ${formatValue(evidence.bars_required)} daily bars are available for ${label}. Sentinel can suggest a methodology stop after enough history exists.`;
+        }
+        return evidence.stop_suggestion_reason || evidence.suggestion_reason || "Recommendation unavailable until market data is loaded for this ticker.";
+      }
+
+      function setupStopFallbackText(evidence = {}) {
+        if (setupStopHasInsufficientHistory(evidence)) {
+          return "Enter your own stop/profit-lock level now; Sentinel can calculate a suggested stop after enough history is available.";
+        }
+        return "Use Import & Run Monitor or Backfill Massive Data, then rerun evaluation to generate a reviewable recommendation.";
       }
 
       function setupStopActionText(ruleId, evidence = {}) {
@@ -5196,7 +5218,7 @@
         if (setupStopHasRecommendation(evidence)) {
           return "Review the suggested protective stop below, adjust it if needed, then save it as this holding's monitored stop. Sentinel does not place broker orders.";
         }
-        return "Enter your own stop/profit-lock level, or load Massive data and rerun the monitor so Sentinel can calculate a suggested stop.";
+        return setupStopFallbackText(evidence);
       }
 
       function rowRecommendedAction(row) {
@@ -5268,10 +5290,14 @@
       function setupStopRecommendationMarkup(evidence = {}) {
         const suggestedStop = toNumber(evidence.suggested_stop);
         if (suggestedStop !== null) {
+          const limitedHistoryMarkup = setupStopUsesLimitedHistory(evidence)
+            ? `<span>Sentinel is using the available price history for now: ${escapeHtml(formatValue(evidence.bars_available))} of ${escapeHtml(formatValue(evidence.bars_required))} daily bars. Review this interim stop before saving it.</span>`
+            : "";
           return `
           <div class="suggested-stop-card">
             <strong>Suggested protective stop: ${formatNumber(suggestedStop)}</strong>
             <span>Basis: ${escapeHtml(evidence.basis_rule || "methodology stop model")} with ${formatAbsPercent(evidence.buffer_pct || 0)} buffer. Review before saving. Sentinel does not place broker orders.</span>
+            ${limitedHistoryMarkup}
             <button type="button" data-use-suggested-stop="${formatNumber(suggestedStop)}">Use suggested stop</button>
           </div>
           `;
@@ -5280,7 +5306,7 @@
           <div class="suggested-stop-card unavailable">
             <strong>Stop recommendation unavailable</strong>
             <span>${escapeHtml(setupStopRecommendationReason(evidence))}</span>
-            <span>Use your own broker or trading-plan stop now, or load Massive data and rerun the monitor to generate a reviewable recommendation.</span>
+            <span>${escapeHtml(setupStopFallbackText(evidence))}</span>
           </div>
         `;
       }

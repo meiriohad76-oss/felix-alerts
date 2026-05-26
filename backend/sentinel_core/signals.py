@@ -12,12 +12,14 @@ from .indicators import (
     distance_pct,
     index_at_or_before,
     latest_pivot_low,
+    mean_decimal,
     quantize_price,
     sma_adj_close,
 )
 from .models import AlertSubscription, PortfolioTickerView, RuleResult
 
 DEFAULT_STOP_BUFFER = Decimal("0.01")
+MIN_LIMITED_HISTORY_STOP_BARS = 100
 
 
 def _subscription_id_for(rule_id: str, subscriptions: Iterable[AlertSubscription]) -> Optional[UUID]:
@@ -98,18 +100,44 @@ def _initial_profit_lock_suggestion(ticker: PortfolioTickerView, asof: date) -> 
 
     current_bar = bars[idx]
     current_sma = sma_adj_close(bars, idx, exit_period)
+    limited_history = False
+    bars_available = idx + 1
+    if current_sma is None:
+        exit_ma_label = "SMA%s" % exit_period
+        if exit_period == 150 and bars_available > MIN_LIMITED_HISTORY_STOP_BARS:
+            current_sma = mean_decimal(bar.adj_close for bar in bars[: idx + 1])
+            limited_history = True
+        else:
+            return {
+                "asof": current_bar.date.isoformat(),
+                "close": str(current_bar.adj_close),
+                "exit_ma_period": exit_period,
+                "exit_ma_label": exit_ma_label,
+                "bars_available": bars_available,
+                "bars_required": exit_period,
+                "stop_suggestion_status": "insufficient_history",
+                "stop_suggestion_reason": (
+                    "Only %s daily bars are available. %s requires %s bars before Sentinel can calculate a methodology stop."
+                    % (bars_available, exit_ma_label, exit_period)
+                ),
+            }
     if current_sma is None:
         return {
             "asof": current_bar.date.isoformat(),
             "close": str(current_bar.adj_close),
             "exit_ma_period": exit_period,
-            "stop_suggestion_status": "unavailable",
-            "stop_suggestion_reason": "More daily bars are required before the exit moving average can be calculated.",
+            "bars_available": bars_available,
+            "bars_required": exit_period,
+            "stop_suggestion_status": "insufficient_history",
+            "stop_suggestion_reason": "Daily bars are required before Sentinel can calculate a methodology stop.",
         }
 
     pivots = ticker.swing_pivots or detect_swing_pivots(bars)
     latest_low = latest_pivot_low(pivots, current_bar.date)
-    if latest_low is not None and latest_low.price > current_sma:
+    if limited_history:
+        candidate_base = current_sma
+        basis_rule = "%s-bar limited-history average" % bars_available
+    elif latest_low is not None and latest_low.price > current_sma:
         candidate_base = latest_low.price
         basis_rule = "swing low above SMA%s" % exit_period
     else:
@@ -124,9 +152,20 @@ def _initial_profit_lock_suggestion(ticker: PortfolioTickerView, asof: date) -> 
         "exit_ma_period": exit_period,
         "buffer_pct": str(DEFAULT_STOP_BUFFER),
         "basis_rule": basis_rule,
-        "stop_suggestion_status": "available",
+        "stop_suggestion_status": "limited_history" if limited_history else "available",
         "suggested_stop": str(suggested_stop),
     }
+    if limited_history:
+        payload.update(
+            {
+                "bars_available": bars_available,
+                "bars_required": exit_period,
+                "stop_suggestion_reason": (
+                    "SMA%s normally requires %s bars; Sentinel is using the %s available daily bars for this interim stop suggestion."
+                    % (exit_period, exit_period, bars_available)
+                ),
+            }
+        )
     if latest_low is not None:
         payload.update(
             {

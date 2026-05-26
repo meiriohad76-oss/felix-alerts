@@ -57,6 +57,50 @@ class SignalTests(unittest.TestCase):
         self.assertEqual(len(p7), 1)
         self.assertEqual(p7[0].kind, "distribution")
 
+    def test_missing_profit_lock_reports_insufficient_history_for_stop_suggestion(self):
+        bars = list(flat_bars(60, close=100))
+        ticker = ticker_view(
+            "DRAM",
+            "investor",
+            shares=dec(10),
+            entry_price=dec(90),
+            bars=tuple(bars),
+        )
+
+        results = evaluate_ticker(ticker, asof=bars[-1].date)
+        setup_results = [result for result in results if result.rule_id in {"T1", "A1"}]
+
+        self.assertEqual([result.rule_id for result in setup_results], ["T1", "A1"])
+        for result in setup_results:
+            self.assertEqual(result.payload["stop_suggestion_status"], "insufficient_history")
+            self.assertEqual(result.payload["bars_available"], 60)
+            self.assertEqual(result.payload["bars_required"], 150)
+            self.assertIn("Only 60 daily bars are available", result.payload["stop_suggestion_reason"])
+            self.assertIn("SMA150 requires 150", result.payload["stop_suggestion_reason"])
+            self.assertNotIn("suggested_stop", result.payload)
+
+    def test_missing_profit_lock_uses_limited_history_above_100_bars(self):
+        bars = list(flat_bars(120, close=100))
+        ticker = ticker_view(
+            "DRAM",
+            "investor",
+            shares=dec(10),
+            entry_price=dec(90),
+            bars=tuple(bars),
+        )
+
+        results = evaluate_ticker(ticker, asof=bars[-1].date)
+        setup_results = [result for result in results if result.rule_id in {"T1", "A1"}]
+
+        self.assertEqual([result.rule_id for result in setup_results], ["T1", "A1"])
+        for result in setup_results:
+            self.assertEqual(result.payload["stop_suggestion_status"], "limited_history")
+            self.assertEqual(result.payload["bars_available"], 120)
+            self.assertEqual(result.payload["bars_required"], 150)
+            self.assertEqual(result.payload["basis_rule"], "120-bar limited-history average")
+            self.assertEqual(result.payload["suggested_stop"], "99.00")
+            self.assertIn("using the 120 available daily bars", result.payload["stop_suggestion_reason"])
+
     def test_t4_profit_lock_never_lowers(self):
         bars = list(flat_bars(151, close=100))
         asof = bars[-1].date

@@ -229,7 +229,12 @@ class FrontendSidebarStaticTests(unittest.TestCase):
         html = self.read_sidebar()
         self.assertIn("Stop recommendation", html)
         self.assertIn("Stop recommendation unavailable", html)
-        self.assertIn("Recommendation unavailable until Massive data is loaded for this ticker.", html)
+        self.assertIn("function setupStopHasInsufficientHistory", html)
+        self.assertIn("function setupStopUsesLimitedHistory", html)
+        self.assertIn("Only ${formatValue(evidence.bars_available)} of ${formatValue(evidence.bars_required)} daily bars are available", html)
+        self.assertIn("Sentinel is using the available price history for now", html)
+        self.assertIn("Enter your own stop/profit-lock level now; Sentinel can calculate a suggested stop after enough history is available.", html)
+        self.assertNotIn("load Massive data and rerun the monitor to generate a reviewable recommendation.", html)
         self.assertIn("function setupStopRecommendationMarkup", html)
 
     def test_sidebar_uses_readable_custom_tooltips_for_core_explanations(self):
