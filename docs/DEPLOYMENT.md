@@ -267,9 +267,11 @@ Expected:
 
 ## Remaining Deployment Decisions
 
-- GitHub repository name and visibility.
-- Raspberry Pi hostname and final install path if not `/opt/sentinel`.
-- Production hostname, for example `sentinel.yourdomain.com`.
-- Cloudflare Access policy: who can log in.
-- Email SMTP provider and sender address.
-- Telegram bot token and target chat id.
+These items are resolved for the current production Pi deployment:
+
+- **GitHub repository**: `https://github.com/meiriohad76-oss/felix-alerts` (public).
+- **Pi install path**: `/opt/sentinel` (confirmed).
+- **Production hostname**: `sentinel1.ahaddashboards.uk` (Cloudflare tunnel `pi-ai`).
+- **Cloudflare Access**: must be configured before sharing the public URL — see Security Gate section above.
+- **Email SMTP**: not yet configured. Set `SENTINEL_EMAIL_HOST`, `SENTINEL_EMAIL_PORT`, `SENTINEL_EMAIL_FROM`, `SENTINEL_EMAIL_USERNAME`, `SENTINEL_EMAIL_PASSWORD` in `/etc/sentinel/sentinel.env`.
+- **Telegram**: not yet configured. Set `SENTINEL_TELEGRAM_BOT_TOKEN` in `/etc/sentinel/sentinel.env`; configure chat id in app Settings.
