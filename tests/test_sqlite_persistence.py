@@ -360,6 +360,41 @@ class SQLiteStoreTests(unittest.TestCase):
         self.assertEqual({ticker.type for ticker in store.list_tickers(portfolio.portfolio_id)}, {"investor"})
         self.assertEqual(len(subscriptions), 20)
 
+    def test_replace_mode_import_deletes_subscriptions_for_inactive_tickers(self):
+        from sentinel_core.persistent_service import PersistentSentinelWorkspace
+        from sentinel_core.sqlite_store import SQLiteStore
+        from uuid import uuid4
+
+        store = SQLiteStore.in_memory()
+        workspace = PersistentSentinelWorkspace(store)
+        user_id = uuid4()
+        portfolio = workspace.create_portfolio(user_id=user_id, name="Test")
+        pid = portfolio.portfolio_id
+
+        # Import AAPL and MSFT in merge mode (default)
+        workspace.import_csv(
+            user_id=user_id,
+            portfolio_id=pid,
+            csv_text="ticker\nAAPL\nMSFT\n",
+        )
+        subs_before = store.list_subscriptions(pid)
+        msft_before = [s for s in subs_before if s.ticker == "MSFT"]
+        self.assertGreater(len(msft_before), 0, "MSFT should have subscriptions after initial import")
+
+        # Replace-import with AAPL only — MSFT becomes inactive
+        workspace.import_csv(
+            user_id=user_id,
+            portfolio_id=pid,
+            csv_text="ticker\nAAPL\n",
+            mode="replace",
+        )
+        subs_after = store.list_subscriptions(pid)
+        aapl_after = [s for s in subs_after if s.ticker == "AAPL"]
+        msft_after = [s for s in subs_after if s.ticker == "MSFT"]
+
+        self.assertGreater(len(aapl_after), 0, "AAPL subscriptions must be preserved")
+        self.assertEqual(len(msft_after), 0, "MSFT subscriptions must be deleted when ticker goes inactive")
+
     def test_evaluate_resolves_setup_alert_after_condition_is_fixed(self):
         user_id = uuid4()
         store = SQLiteStore.in_memory()

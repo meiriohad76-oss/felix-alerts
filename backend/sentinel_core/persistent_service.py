@@ -48,8 +48,9 @@ class PersistentSentinelWorkspace:
             mode=mode,
         )
         self.store.save_tickers(report.tickers)
+        active_tickers = [t for t in report.tickers if t.status == "active"]
         subscriptions = create_subscriptions_for_portfolio(
-            report.tickers,
+            active_tickers,
             created_from_import_id=report.import_id,
             existing=self.store.list_subscriptions(portfolio_id),
         )
@@ -81,8 +82,9 @@ class PersistentSentinelWorkspace:
         updated = replace(current, type=ticker_type)
         self.store.save_tickers([updated])
         tickers = self.store.list_tickers(portfolio_id)
+        active_tickers = [t for t in tickers if t.status == "active"]
         subscriptions = create_subscriptions_for_portfolio(
-            tickers,
+            active_tickers,
             existing=self.store.list_subscriptions(portfolio_id),
         )
         self.store.replace_subscriptions(portfolio_id, subscriptions)
@@ -97,8 +99,9 @@ class PersistentSentinelWorkspace:
         if updated:
             self.store.save_tickers(updated)
             tickers = self.store.list_tickers(portfolio_id)
+            active_tickers = [t for t in tickers if t.status == "active"]
             subscriptions = create_subscriptions_for_portfolio(
-                tickers,
+                active_tickers,
                 existing=self.store.list_subscriptions(portfolio_id),
             )
             self.store.replace_subscriptions(portfolio_id, subscriptions)

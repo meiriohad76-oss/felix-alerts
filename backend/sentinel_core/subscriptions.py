@@ -73,10 +73,17 @@ def create_subscriptions_for_portfolio(
     created_from_import_id: Optional[UUID] = None,
     existing: Iterable[AlertSubscription] = (),
 ) -> List[AlertSubscription]:
+    tickers_list = list(tickers)
+    inactive = [t.ticker for t in tickers_list if t.status != "active"]
+    if inactive:
+        raise ValueError(
+            "create_subscriptions_for_portfolio received inactive tickers: %s. "
+            "Filter to active tickers before calling." % ", ".join(sorted(inactive))
+        )
     existing_list = list(existing)
     subscriptions: List[AlertSubscription] = []
     seen: Set[UUID] = set()
-    for ticker in tickers:
+    for ticker in tickers_list:
         for subscription in create_subscriptions_for_ticker(
             ticker,
             created_from_import_id=created_from_import_id,
