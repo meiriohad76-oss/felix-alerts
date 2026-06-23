@@ -395,6 +395,124 @@ class SQLiteStoreTests(unittest.TestCase):
         self.assertGreater(len(aapl_after), 0, "AAPL subscriptions must be preserved")
         self.assertEqual(len(msft_after), 0, "MSFT subscriptions must be deleted when ticker goes inactive")
 
+    def test_save_scorecard_event_if_not_exists_is_idempotent(self):
+        from sentinel_core.sqlite_store import SQLiteStore
+        from sentinel_core.persistent_service import PersistentSentinelWorkspace
+        from sentinel_core.models import ScorecardEvent
+        from datetime import datetime
+        from uuid import uuid4
+
+        store = SQLiteStore.in_memory()
+        workspace = PersistentSentinelWorkspace(store)
+        user_id = uuid4()
+        portfolio = workspace.create_portfolio(user_id=user_id, name="Test")
+        portfolio_id = portfolio.portfolio_id
+        alert_id = uuid4()
+        event = ScorecardEvent(
+            event_id=uuid4(),
+            user_id=user_id,
+            portfolio_id=portfolio_id,
+            portfolio_ticker_id=uuid4(),
+            ticker="AAPL",
+            alert_id=alert_id,
+            kind="deferred",
+            rule_id="P1",
+            occurred_at=datetime(2026, 6, 23, 12, 0, 0),
+            note="Exit alert open for 2 days, 1:00:00",
+        )
+
+        written_first = store.save_scorecard_event_if_not_exists(event)
+        self.assertTrue(written_first, "First call should write the event")
+
+        # Second call with same alert_id + kind — must not write again
+        duplicate = ScorecardEvent(
+            event_id=uuid4(),  # different event_id, same (alert_id, kind)
+            user_id=user_id,
+            portfolio_id=portfolio_id,
+            portfolio_ticker_id=uuid4(),
+            ticker="AAPL",
+            alert_id=alert_id,
+            kind="deferred",
+            rule_id="P1",
+            occurred_at=datetime(2026, 6, 23, 13, 0, 0),
+            note="duplicate",
+        )
+        written_second = store.save_scorecard_event_if_not_exists(duplicate)
+        self.assertFalse(written_second, "Second call with same (alert_id, kind) must be a no-op")
+
+    def test_evaluate_portfolio_writes_deferred_scorecard_event_for_stale_exit_alert(self):
+        from sentinel_core.persistent_service import PersistentSentinelWorkspace
+        from sentinel_core.sqlite_store import SQLiteStore
+        from sentinel_core.models import AlertRecord, RuleResult, AlertExplanation
+        from datetime import datetime, timedelta, date
+        from uuid import uuid4
+        import unittest.mock as mock
+
+        store = SQLiteStore.in_memory()
+        workspace = PersistentSentinelWorkspace(store)
+        user_id = uuid4()
+        portfolio = workspace.create_portfolio(user_id=user_id, name="Test")
+        pid = portfolio.portfolio_id
+
+        # Import a ticker so evaluate has something to work with
+        workspace.import_csv(
+            user_id=user_id,
+            portfolio_id=pid,
+            csv_text="ticker,type\nAAPL,investor\n",
+        )
+
+        # Directly inject a stale open exit alert (created 49 hours ago)
+        ticker_obj = store.list_tickers(pid)[0]
+        stale_time = datetime.utcnow() - timedelta(hours=49)
+        result = RuleResult(
+            user_id=user_id,
+            portfolio_id=pid,
+            portfolio_ticker_id=ticker_obj.portfolio_ticker_id,
+            ticker="AAPL",
+            rule_id="P1",
+            kind="exit",
+            severity="critical",
+            triggered=True,
+            state_active=True,
+            suggested_action="Exit position",
+            payload={},
+            dedupe_key="P1:AAPL:exit",
+        )
+        explanation = AlertExplanation(
+            rule_id="P1",
+            title="SMA150 exit",
+            what_triggered="Price crossed below SMA150",
+            rule_rationale="Investor exit rule",
+            evidence={},
+            recommended_action="Exit position",
+            source_section="P1",
+        )
+        alert = AlertRecord(
+            alert_id=uuid4(),
+            result=result,
+            explanation=explanation,
+            ticket=None,
+            status="new",
+            created_at=stale_time,
+        )
+        store.save_alert(alert)
+
+        # Run evaluate with no market data — it will resolve the manually inserted alert
+        # but stale scorecard wiring should still fire on the open alerts found before resolve
+        # Use a mock provider that returns no bars
+        from sentinel_core.market_data import InMemoryMarketDataProvider
+        # evaluate_portfolio uses store.list_alerts which includes our stale alert
+        # The stale exit check runs after alert resolution, so we check scorecard_events
+        workspace.evaluate_portfolio(portfolio_id=pid, asof=date.today())
+
+        # Scorecard events table should have a 'deferred' event for our stale alert
+        rows = store.conn.execute(
+            "SELECT kind FROM scorecard_events WHERE alert_id = ?",
+            (str(alert.alert_id),),
+        ).fetchall()
+        kinds = {row["kind"] for row in rows}
+        self.assertIn("deferred", kinds, "evaluate_portfolio must write a deferred scorecard event for stale exit alerts")
+
     def test_evaluate_resolves_setup_alert_after_condition_is_fixed(self):
         user_id = uuid4()
         store = SQLiteStore.in_memory()

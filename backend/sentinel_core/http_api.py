@@ -28,6 +28,7 @@ from .market_data import (
 from .notifications import EmailMessage
 from .persistent_service import PersistentSentinelWorkspace
 from .rule_catalog import get_rule
+from .scorecard import stale_exit_events
 from .serialization import to_jsonable
 from .sqlite_store import SQLiteStore
 from .subscriptions import applicable_rule_ids
@@ -213,6 +214,11 @@ class SentinelApi:
         if method == "POST" and match:
             return HTTPStatus.OK, self.acknowledge(UUID(match.group(1)), UUID(match.group(2)), body)
 
+        match = re.fullmatch(r"/portfolios/([^/]+)/maintenance/scorecard", path)
+        if method == "POST" and match:
+            portfolio_id = UUID(match.group(1))
+            return HTTPStatus.OK, self.maintenance_scorecard(portfolio_id)
+
         match = re.fullmatch(r"/portfolios/([^/]+)/report", path)
         if method == "GET" and match:
             portfolio_id = UUID(match.group(1))
@@ -304,6 +310,28 @@ class SentinelApi:
                 "error": "Enable email or Telegram alerts before sending a test notification.",
             })
         return {"results": tuple(results), "delivery_status": self.notification_delivery_status()}
+
+    def maintenance_scorecard(self, portfolio_id: UUID) -> dict:
+        """Sweep open exit alerts and write deferred/missed scorecard events.
+
+        Idempotent: safe to call from a daily cron job on the Pi.
+        Returns counts of newly written events only (not skipped duplicates).
+        """
+        open_exit_alerts = [
+            a for a in self.workspace.store.list_alerts(portfolio_id)
+            if a.status in {"new", "sent"} and a.result.kind == "exit"
+        ]
+        events = stale_exit_events(open_exit_alerts)
+        deferred_written = 0
+        missed_written = 0
+        for event in events:
+            written = self.workspace.store.save_scorecard_event_if_not_exists(event)
+            if written:
+                if event.kind == "deferred":
+                    deferred_written += 1
+                elif event.kind == "missed":
+                    missed_written += 1
+        return {"deferred_written": deferred_written, "missed_written": missed_written}
 
     def market_data_config(self) -> dict:
         massive_configured = bool(os.environ.get("MASSIVE_API_KEY", "").strip())

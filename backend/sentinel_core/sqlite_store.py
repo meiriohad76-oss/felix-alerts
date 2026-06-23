@@ -1098,6 +1098,22 @@ class SQLiteStore:
             )
             self.conn.commit()
 
+    def save_scorecard_event_if_not_exists(self, event: ScorecardEvent) -> bool:
+        """Write event only if no event with the same (alert_id, kind) exists.
+
+        Returns True if the event was written, False if already present.
+        This prevents duplicate deferred/missed events on repeated evaluate runs.
+        """
+        with self._lock:
+            existing = self.conn.execute(
+                "SELECT 1 FROM scorecard_events WHERE alert_id = ? AND kind = ?",
+                (str(event.alert_id), event.kind),
+            ).fetchone()
+            if existing is not None:
+                return False
+            self.save_scorecard_event(event)
+            return True
+
     def list_scorecard_events(self, portfolio_id: UUID) -> Tuple[ScorecardEvent, ...]:
         with self._lock:
             rows = self.conn.execute(

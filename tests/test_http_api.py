@@ -1276,5 +1276,68 @@ class HttpApiTests(unittest.TestCase):
             server.server_close()
 
 
+    def test_maintenance_scorecard_endpoint_returns_counts_and_is_idempotent(self):
+        import threading
+        from datetime import datetime, timedelta
+        from uuid import uuid4
+        from sentinel_core.sqlite_store import SQLiteStore
+        from sentinel_core.persistent_service import PersistentSentinelWorkspace
+        from sentinel_core.http_api import SentinelApi
+        from sentinel_core.models import AlertRecord, RuleResult, AlertExplanation
+        from http import HTTPStatus
+
+        # Set up a controlled workspace
+        store = SQLiteStore.in_memory()
+        workspace = PersistentSentinelWorkspace(store)
+        api = SentinelApi(workspace)
+        user_id = uuid4()
+
+        # Create portfolio via API
+        status, body = api.handle("POST", "/portfolios", {}, {"name": "Test", "user_id": str(user_id)})
+        portfolio_id = body["portfolio"].portfolio_id
+
+        # Inject a stale open exit alert (49 hours old)
+        ticker_id = uuid4()
+        stale_time = datetime.utcnow() - timedelta(hours=49)
+        result = RuleResult(
+            user_id=user_id,
+            portfolio_id=portfolio_id,
+            portfolio_ticker_id=ticker_id,
+            ticker="AAPL",
+            rule_id="P1",
+            kind="exit",
+            severity="critical",
+            triggered=True,
+            state_active=True,
+            suggested_action="Exit",
+            payload={},
+            dedupe_key="P1:AAPL:exit",
+        )
+        explanation = AlertExplanation(
+            rule_id="P1", title="P1", what_triggered="x",
+            rule_rationale="r", evidence={}, recommended_action="a", source_section="P1",
+        )
+        alert = AlertRecord(
+            alert_id=uuid4(), result=result, explanation=explanation,
+            ticket=None, status="new", created_at=stale_time,
+        )
+        store.save_alert(alert)
+
+        # Call maintenance endpoint
+        status, resp = api.handle(
+            "POST", "/portfolios/%s/maintenance/scorecard" % portfolio_id, {}, {}
+        )
+        self.assertEqual(status, HTTPStatus.OK)
+        self.assertEqual(resp["deferred_written"], 1)
+        self.assertEqual(resp["missed_written"], 0)
+
+        # Second call must be idempotent
+        status2, resp2 = api.handle(
+            "POST", "/portfolios/%s/maintenance/scorecard" % portfolio_id, {}, {}
+        )
+        self.assertEqual(resp2["deferred_written"], 0)
+        self.assertEqual(resp2["missed_written"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()

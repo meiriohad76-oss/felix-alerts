@@ -19,7 +19,7 @@ from .notifications import (
     telegram_provider_from_environment,
 )
 from .reports import build_portfolio_report
-from .scorecard import acknowledge_alert
+from .scorecard import acknowledge_alert, stale_exit_events
 from .signals import evaluate_ticker
 from .sqlite_store import SQLiteStore
 from .subscriptions import create_subscriptions_for_portfolio
@@ -211,6 +211,14 @@ class PersistentSentinelWorkspace:
             resolved = self.store.resolve_stale_open_alerts(portfolio_id, active_dedupe_keys)
             self.store.save_alerts(refreshed)
             self.store.save_alerts(created)
+            # Wire stale exit scorecard events — deferred (48 h) and missed (7 d)
+            # Uses existing_alerts (pre-run snapshot) so resolved alerts are still included.
+            open_exit_alerts = [
+                a for a in existing_alerts
+                if a.status in {"new", "sent"} and a.result.kind == "exit"
+            ]
+            for stale_event in stale_exit_events(open_exit_alerts):
+                self.store.save_scorecard_event_if_not_exists(stale_event)
             notification_settings = self.store.get_notification_settings(portfolio_id)
             notifications = (
                 notifications_for_alerts(created)
