@@ -96,6 +96,20 @@ def scan_secrets(files: list[Path]) -> list[str]:
     return findings
 
 
+def check_deployment_doc_security_gate() -> list[str]:
+    """Warn if the Security Gate section has been removed from DEPLOYMENT.md."""
+    deployment_md = ROOT / "docs" / "DEPLOYMENT.md"
+    if not deployment_md.exists():
+        return ["docs/DEPLOYMENT.md not found — security gate cannot be verified"]
+    text = deployment_md.read_text(encoding="utf-8")
+    if "Security Gate" not in text:
+        return [
+            "docs/DEPLOYMENT.md is missing the 'Security Gate' section. "
+            "Add the Cloudflare Access prerequisite before publishing."
+        ]
+    return []
+
+
 def main() -> int:
     files = upload_files()
     os_metadata = find_os_metadata_files()
@@ -111,6 +125,13 @@ def main() -> int:
         for finding in findings:
             print(finding, file=sys.stderr)
         return 1
+
+    security_warnings = check_deployment_doc_security_gate()
+    if security_warnings:
+        print("Upload package validation warning:", file=sys.stderr)
+        for warning in security_warnings:
+            print("  " + warning, file=sys.stderr)
+        # Warn only — do not fail the validation, since this is a docs check
 
     print("Upload package validation passed.")
     print("Files/folders to upload manually:")

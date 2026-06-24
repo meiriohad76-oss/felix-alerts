@@ -128,6 +128,29 @@ Restore from a known-good backup:
 sudo /opt/sentinel/deploy/raspberry-pi/restore_database.sh /var/backups/sentinel/sentinel-YYYYMMDD-HHMMSS.sqlite3
 ```
 
+## ⚠ Security Gate — Required Before Public Exposure
+
+Sentinel has no app-level authentication. All API endpoints that create portfolios, import data, evaluate alerts, save setup values, configure notifications, and acknowledge alerts are **unprotected at the application layer**.
+
+**This is safe only if Cloudflare Access is correctly configured for the public hostname.**
+
+Without Cloudflare Access, anyone who knows the URL can read and modify your portfolio data.
+
+### Enabling Cloudflare Access
+
+1. Open [Cloudflare Zero Trust](https://one.dash.cloudflare.com/).
+2. Go to **Access → Applications → Add an application**.
+3. Choose **Self-hosted**.
+4. Set the application domain to `sentinel1.ahaddashboards.uk` (or your hostname).
+5. Under **Policies**, add an **Allow** policy restricted to your email address.
+6. Save. Cloudflare Access will now challenge any browser visit with a login page.
+
+### Verifying Access Is Active
+
+Open `https://sentinel1.ahaddashboards.uk/` in a **private browser window** (to bypass cached auth). You should see a Cloudflare Access login prompt — not the Sentinel dashboard directly.
+
+If you see the dashboard without a login prompt, Access is not active. Do not share the URL until this is confirmed.
+
 ## 3. Cloudflare Tunnel
 
 Use Cloudflare Tunnel only after the Pi service is healthy locally.
