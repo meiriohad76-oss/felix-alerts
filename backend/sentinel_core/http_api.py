@@ -176,11 +176,13 @@ class SentinelApi:
 
         match = re.fullmatch(r"/portfolios/([^/]+)/backfill-online", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.backfill_online(_parse_uuid(match.group(1), "portfolio_id"), body)
+            from .api_market_data import handle_backfill_online
+            return handle_backfill_online(_parse_uuid(match.group(1), "portfolio_id"), body, self.workspace.store)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/backfill-massive", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.backfill_massive(_parse_uuid(match.group(1), "portfolio_id"), body)
+            from .api_market_data import handle_backfill_massive
+            return handle_backfill_massive(_parse_uuid(match.group(1), "portfolio_id"), body, self.workspace.store)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/evaluate", path)
         if method == "POST" and match:
@@ -197,22 +199,23 @@ class SentinelApi:
 
         match = re.fullmatch(r"/portfolios/([^/]+)/alerts", path)
         if method == "GET" and match:
-            portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
-            return HTTPStatus.OK, {"alerts": self.workspace.list_alerts(portfolio_id=portfolio_id)}
+            from .api_alerts import handle_list_alerts
+            return handle_list_alerts(_parse_uuid(match.group(1), "portfolio_id"), self.workspace)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/alert-events", path)
         if method == "GET" and match:
+            from .api_alerts import handle_list_alert_events
             portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
             ticker = query.get("ticker", [""])[0].strip().upper() or None
-            return HTTPStatus.OK, {
-                "events": self.workspace.store.list_alert_events(portfolio_id, ticker=ticker)
-            }
+            return handle_list_alert_events(portfolio_id, ticker, self.workspace)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/notification-settings", path)
         if method == "GET" and match:
-            return HTTPStatus.OK, self.notification_settings(_parse_uuid(match.group(1), "portfolio_id"))
+            from .api_notifications import handle_get_notification_settings
+            return handle_get_notification_settings(_parse_uuid(match.group(1), "portfolio_id"), self.workspace)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.save_notification_settings(_parse_uuid(match.group(1), "portfolio_id"), body)
+            from .api_notifications import handle_save_notification_settings
+            return handle_save_notification_settings(_parse_uuid(match.group(1), "portfolio_id"), body, self.workspace)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/notification-settings/test", path)
         if method == "POST" and match:
@@ -220,10 +223,8 @@ class SentinelApi:
 
         match = re.fullmatch(r"/portfolios/([^/]+)/notifications", path)
         if method == "GET" and match:
-            portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
-            return HTTPStatus.OK, {
-                "notifications": self.workspace.list_notifications(portfolio_id=portfolio_id)
-            }
+            from .api_notifications import handle_list_notifications
+            return handle_list_notifications(_parse_uuid(match.group(1), "portfolio_id"), self.workspace)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/alerts/([^/]+)/ack", path)
         if method == "POST" and match:
@@ -235,8 +236,8 @@ class SentinelApi:
 
         match = re.fullmatch(r"/portfolios/([^/]+)/maintenance/scorecard", path)
         if method == "POST" and match:
-            portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
-            return HTTPStatus.OK, self.maintenance_scorecard(portfolio_id)
+            from .api_alerts import handle_maintenance_scorecard
+            return handle_maintenance_scorecard(_parse_uuid(match.group(1), "portfolio_id"), self.workspace)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/report", path)
         if method == "GET" and match:
@@ -245,11 +246,8 @@ class SentinelApi:
 
         match = re.fullmatch(r"/jobs/([^/]+)", path)
         if method == "GET" and match:
-            job_id = _parse_uuid(match.group(1), "job_id")
-            job = self.workspace.store.get_job(job_id)
-            if job is None:
-                raise ApiError(HTTPStatus.NOT_FOUND, "Job not found: %s" % job_id)
-            return HTTPStatus.OK, {"job": job}
+            from .api_jobs import handle_get_job
+            return handle_get_job(match.group(1), self.workspace)
 
         raise ApiError(HTTPStatus.NOT_FOUND, "No route for %s %s" % (method, path))
 
