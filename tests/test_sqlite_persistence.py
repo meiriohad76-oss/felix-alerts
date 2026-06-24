@@ -538,6 +538,41 @@ class SQLiteStoreTests(unittest.TestCase):
         alerts = store.list_alerts(portfolio.portfolio_id)
         self.assertEqual([(alert.result.rule_id, alert.status) for alert in alerts], [("C1", "resolved")])
 
+    def test_monitor_job_enqueue_and_get(self):
+        from sentinel_core.models import Portfolio
+        from uuid import uuid4
+
+        store = SQLiteStore.in_memory()
+        pid = uuid4()
+        store.save_portfolio(Portfolio(portfolio_id=pid, user_id=uuid4(), name="Test"))
+
+        job = store.enqueue_job(pid, kind="backfill_massive", params={"api_key": "test", "lookback": 250})
+        self.assertEqual(job["status"], "queued")
+        self.assertIn("job_id", job)
+
+        fetched = store.get_job(job["job_id"])
+        self.assertIsNotNone(fetched)
+        self.assertEqual(fetched["status"], "queued")
+        self.assertEqual(fetched["kind"], "backfill_massive")
+        self.assertEqual(fetched["portfolio_id"], pid)
+
+    def test_monitor_job_dequeue_sets_running(self):
+        from sentinel_core.models import Portfolio
+        from uuid import uuid4
+
+        store = SQLiteStore.in_memory()
+        pid = uuid4()
+        store.save_portfolio(Portfolio(portfolio_id=pid, user_id=uuid4(), name="Test"))
+
+        job = store.enqueue_job(pid, kind="evaluate", params={"asof": "2026-06-23"})
+        dequeued = store.dequeue_next_job()
+        self.assertIsNotNone(dequeued)
+        self.assertEqual(str(dequeued["job_id"]), str(job["job_id"]))
+        self.assertEqual(dequeued["status"], "running")
+
+        # dequeue again — nothing left
+        self.assertIsNone(store.dequeue_next_job())
+
 
 if __name__ == "__main__":
     unittest.main()

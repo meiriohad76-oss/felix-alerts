@@ -243,6 +243,14 @@ class SentinelApi:
             portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
             return HTTPStatus.OK, {"report": self.workspace.build_report(portfolio_id=portfolio_id)}
 
+        match = re.fullmatch(r"/jobs/([^/]+)", path)
+        if method == "GET" and match:
+            job_id = _parse_uuid(match.group(1), "job_id")
+            job = self.workspace.store.get_job(job_id)
+            if job is None:
+                raise ApiError(HTTPStatus.NOT_FOUND, "Job not found: %s" % job_id)
+            return HTTPStatus.OK, {"job": job}
+
         raise ApiError(HTTPStatus.NOT_FOUND, "No route for %s %s" % (method, path))
 
     def create_portfolio(self, body: dict) -> dict:
@@ -688,188 +696,31 @@ class SentinelApi:
         }
 
     def backfill_online(self, portfolio_id: UUID, body: dict) -> dict:
+        """Enqueue an online (Yahoo Chart) backfill job and return immediately."""
         end = _parse_iso_date(body.get("end"), "end")
         lookback = _parse_limited_int(body.get("lookback"), "lookback", default=250, minimum=1, maximum=1000)
-        provider = YahooChartMarketDataProvider(
-            range_value=body.get("range", "2y"),
-            timeout_seconds=_parse_limited_int(
-                body.get("timeout_seconds"),
-                "timeout_seconds",
-                default=10,
-                minimum=1,
-                maximum=60,
-            ),
-            proxy_url=_detect_proxy_url(),
+        job = self.workspace.store.enqueue_job(
+            portfolio_id,
+            kind="backfill_online",
+            params={"lookback": lookback, "end": end.isoformat()},
         )
-        tickers = self.workspace.store.list_tickers(portfolio_id, include_inactive=False)
-        connectivity_error, provider.proxy_url = _https_connectivity_error_with_proxy_retry(
-            "https://query1.finance.yahoo.com",
-            timeout_seconds=min(provider.timeout_seconds, 8),
-            service_label="online fallback data provider",
-            proxy_url=provider.proxy_url,
-        )
-        if connectivity_error:
-            for ticker in tickers:
-                self.workspace.store.record_market_data_failure(
-                    ticker.ticker,
-                    source="online-yahoo-chart",
-                    source_label="Online fallback (Yahoo chart)",
-                    error=connectivity_error,
-                )
-            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, connectivity_error)
-
-        updated = []
-        failed = []
-        for ticker in tickers:
-            if not provider.validate_symbol(ticker.ticker):
-                error = "symbol format is not supported"
-                self.workspace.store.record_market_data_failure(
-                    ticker.ticker,
-                    source="online-yahoo-chart",
-                    source_label="Online fallback (Yahoo chart)",
-                    error=error,
-                )
-                failed.append({"ticker": ticker.ticker, "error": error})
-                continue
-            try:
-                bars = provider.get_bars(ticker.ticker, end=end, lookback=lookback)
-            except Exception as exc:
-                error = str(exc)
-                self.workspace.store.record_market_data_failure(
-                    ticker.ticker,
-                    source="online-yahoo-chart",
-                    source_label="Online fallback (Yahoo chart)",
-                    error=error,
-                )
-                failed.append({"ticker": ticker.ticker, "error": error})
-                continue
-            if not bars:
-                error = "no bars returned"
-                self.workspace.store.record_market_data_failure(
-                    ticker.ticker,
-                    source="online-yahoo-chart",
-                    source_label="Online fallback (Yahoo chart)",
-                    error=error,
-                )
-                failed.append({"ticker": ticker.ticker, "error": error})
-                continue
-            self.workspace.store.save_bars(
-                ticker.ticker,
-                bars,
-                source="online-yahoo-chart",
-                source_label="Online fallback (Yahoo chart)",
-            )
-            updated.append(ticker.ticker)
-        return {"updated": tuple(updated), "failed": tuple(failed), "source": "online-yahoo-chart"}
+        return {"job": job}
 
     def backfill_massive(self, portfolio_id: UUID, body: dict) -> dict:
-        api_key = os.environ.get("MASSIVE_API_KEY", "").strip()
-        if not api_key:
-            raise ApiError(
-                HTTPStatus.BAD_REQUEST,
-                "Massive API key is not configured on the server. Set MASSIVE_API_KEY before running Massive backfill.",
-            )
+        """Enqueue a Massive backfill job and return immediately.
 
+        The API key is read from the MASSIVE_API_KEY environment variable by the
+        background worker at execution time — it is never accepted from the
+        request body so that browser-held secrets cannot reach the server.
+        """
         end = _parse_iso_date(body.get("end"), "end")
         lookback = _parse_limited_int(body.get("lookback"), "lookback", default=250, minimum=1, maximum=1000)
-        provider = MassiveMarketDataProvider(
-            api_key=api_key,
-            timeout_seconds=_parse_limited_int(
-                body.get("timeout_seconds"),
-                "timeout_seconds",
-                default=15,
-                minimum=1,
-                maximum=60,
-            ),
-            proxy_url=_detect_proxy_url(),
+        job = self.workspace.store.enqueue_job(
+            portfolio_id,
+            kind="backfill_massive",
+            params={"lookback": lookback, "end": end.isoformat()},
         )
-        all_tickers = self.workspace.store.list_tickers(portfolio_id, include_inactive=False)
-        failed_only = bool(body.get("failed_only"))
-        if failed_only:
-            retry_tickers = []
-            for ticker in all_tickers:
-                status = self.workspace.store.get_market_data_status(ticker.ticker)
-                if (
-                    status.get("last_attempt_source") == "massive-stocks-aggregates"
-                    and status.get("last_attempt_status") == "failed"
-                ):
-                    retry_tickers.append(ticker)
-            tickers = tuple(retry_tickers)
-        else:
-            tickers = all_tickers
-        if failed_only and not tickers:
-            return {
-                "updated": (),
-                "failed": (),
-                "source": "massive-stocks-aggregates",
-                "mode": "failed_only",
-                "selected": (),
-            }
-        connectivity_error, provider.proxy_url = _https_connectivity_error_with_proxy_retry(
-            provider.base_url,
-            timeout_seconds=min(provider.timeout_seconds, 8),
-            service_label="Massive API",
-            proxy_url=provider.proxy_url,
-        )
-        if connectivity_error:
-            for ticker in tickers:
-                self.workspace.store.record_market_data_failure(
-                    ticker.ticker,
-                    source="massive-stocks-aggregates",
-                    source_label="Massive Stocks Aggregates",
-                    error=connectivity_error,
-                )
-            raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, connectivity_error)
-
-        updated = []
-        failed = []
-        for ticker in tickers:
-            if not provider.validate_symbol(ticker.ticker):
-                error = "symbol format is not supported"
-                self.workspace.store.record_market_data_failure(
-                    ticker.ticker,
-                    source="massive-stocks-aggregates",
-                    source_label="Massive Stocks Aggregates",
-                    error=error,
-                )
-                failed.append({"ticker": ticker.ticker, "error": error})
-                continue
-            try:
-                bars = provider.get_bars(ticker.ticker, end=end, lookback=lookback)
-            except Exception as exc:
-                error = _redact_secret(str(exc), api_key)
-                self.workspace.store.record_market_data_failure(
-                    ticker.ticker,
-                    source="massive-stocks-aggregates",
-                    source_label="Massive Stocks Aggregates",
-                    error=error,
-                )
-                failed.append({"ticker": ticker.ticker, "error": error})
-                continue
-            if not bars:
-                error = "no bars returned"
-                self.workspace.store.record_market_data_failure(
-                    ticker.ticker,
-                    source="massive-stocks-aggregates",
-                    source_label="Massive Stocks Aggregates",
-                    error=error,
-                )
-                failed.append({"ticker": ticker.ticker, "error": error})
-                continue
-            self.workspace.store.save_bars(
-                ticker.ticker,
-                bars,
-                source="massive-stocks-aggregates",
-                source_label="Massive Stocks Aggregates",
-            )
-            updated.append(ticker.ticker)
-        return {
-            "updated": tuple(updated),
-            "failed": tuple(failed),
-            "source": "massive-stocks-aggregates",
-            "mode": "failed_only" if failed_only else "all",
-            "selected": tuple(ticker.ticker for ticker in tickers),
-        }
+        return {"job": job}
 
     def evaluate(self, portfolio_id: UUID, body: dict) -> dict:
         asof = _parse_iso_date(body.get("asof"), "asof")
@@ -1604,6 +1455,109 @@ class SentinelHTTPServer(ThreadingHTTPServer):
                 api.workspace.store.close()
 
 
+def _run_job_worker(api: SentinelApi) -> None:
+    """Background daemon thread: process queued monitor jobs one at a time."""
+    import time as _time
+
+    while True:
+        _time.sleep(1)
+        try:
+            job = api.workspace.store.dequeue_next_job()
+            if job is None:
+                continue
+            _execute_job(api, job)
+        except Exception:
+            pass  # worker must never crash
+
+
+def _execute_job(api: SentinelApi, job: dict) -> None:
+    """Execute a single job, updating the job row with final status."""
+    job_id = job["job_id"]
+    portfolio_id = job["portfolio_id"]
+    params = job["params"]
+    kind = job["kind"]
+    tickers_done = 0
+    tickers_failed = 0
+    tickers_total = 0
+
+    try:
+        if kind == "backfill_massive":
+            api_key = os.environ.get("MASSIVE_API_KEY", "").strip()
+            lookback = int(params.get("lookback", 250))
+            end = date.fromisoformat(params.get("end", date.today().isoformat()))
+            provider = MassiveMarketDataProvider(api_key=api_key)
+            tickers = api.workspace.store.list_tickers(portfolio_id, include_inactive=False)
+            tickers_total = len(tickers)
+            for ticker in tickers:
+                try:
+                    bars = provider.get_bars(ticker.ticker, end=end, lookback=lookback)
+                    if bars:
+                        api.workspace.store.save_bars(
+                            ticker.ticker, bars,
+                            source="massive-stocks-aggregates",
+                            source_label="Massive Stocks Aggregates",
+                        )
+                    tickers_done += 1
+                except Exception as exc:
+                    api.workspace.store.record_market_data_failure(
+                        ticker.ticker,
+                        source="massive-stocks-aggregates",
+                        source_label="Massive Stocks Aggregates",
+                        error=str(exc),
+                    )
+                    tickers_failed += 1
+
+        elif kind == "backfill_online":
+            lookback = int(params.get("lookback", 250))
+            end = date.fromisoformat(params.get("end", date.today().isoformat()))
+            provider = YahooChartMarketDataProvider(proxy_url=_detect_proxy_url())
+            tickers = api.workspace.store.list_tickers(portfolio_id, include_inactive=False)
+            tickers_total = len(tickers)
+            for ticker in tickers:
+                try:
+                    bars = provider.get_bars(ticker.ticker, end=end, lookback=lookback)
+                    if bars:
+                        api.workspace.store.save_bars(
+                            ticker.ticker, bars,
+                            source="online-yahoo-chart",
+                            source_label="Online fallback (Yahoo chart)",
+                        )
+                    tickers_done += 1
+                except Exception as exc:
+                    api.workspace.store.record_market_data_failure(
+                        ticker.ticker,
+                        source="online-yahoo-chart",
+                        source_label="Online fallback (Yahoo chart)",
+                        error=str(exc),
+                    )
+                    tickers_failed += 1
+
+        elif kind == "evaluate":
+            asof = date.fromisoformat(params.get("asof", date.today().isoformat()))
+            api.workspace.evaluate_portfolio(portfolio_id=portfolio_id, asof=asof)
+            tickers = api.workspace.store.list_tickers(portfolio_id, include_inactive=False)
+            tickers_total = len(tickers)
+            tickers_done = tickers_total
+
+        api.workspace.store.finish_job(
+            job_id,
+            status="done",
+            tickers_total=tickers_total,
+            tickers_done=tickers_done,
+            tickers_failed=tickers_failed,
+        )
+
+    except Exception as exc:
+        api.workspace.store.finish_job(
+            job_id,
+            status="failed",
+            tickers_total=tickers_total,
+            tickers_done=tickers_done,
+            tickers_failed=tickers_failed,
+            error=str(exc),
+        )
+
+
 def create_server(
     *,
     db_path: str | Path,
@@ -1611,7 +1565,14 @@ def create_server(
     port: int = 8765,
     static_dir: Optional[str | Path] = None,
 ) -> ThreadingHTTPServer:
+    import threading as _threading
     store = SQLiteStore(db_path)
     api = SentinelApi(PersistentSentinelWorkspace(store))
     handler = make_handler(api, Path(static_dir) if static_dir else None)
-    return SentinelHTTPServer((host, port), handler)
+    server = SentinelHTTPServer((host, port), handler)
+    # Start background job worker
+    worker = _threading.Thread(
+        target=_run_job_worker, args=(api,), daemon=True, name="sentinel-job-worker"
+    )
+    worker.start()
+    return server

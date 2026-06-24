@@ -9715,52 +9715,83 @@
         return payload;
       }
 
+      /**
+       * Poll GET /jobs/{jobId} every 2 s until status is done or failed.
+       * Resolves with the final job dict on done, rejects with an error on failed or HTTP error.
+       * @param {string} jobId
+       * @param {function} [onProgress] - called with the job dict on each poll tick
+       * @returns {Promise<object>} final job dict
+       */
+      function pollJobUntilDone(jobId, onProgress) {
+        return new Promise((resolve, reject) => {
+          const interval = setInterval(async () => {
+            try {
+              const resp = await fetch('/jobs/' + jobId);
+              if (!resp.ok) {
+                clearInterval(interval);
+                reject(new Error('HTTP ' + resp.status + ' polling job ' + jobId));
+                return;
+              }
+              const data = await resp.json();
+              const job = data.job;
+              if (onProgress) onProgress(job);
+              if (job.status === 'done' || job.status === 'failed') {
+                clearInterval(interval);
+                if (job.status === 'failed') {
+                  reject(new Error(job.error || 'Job failed'));
+                } else {
+                  resolve(job);
+                }
+              }
+            } catch (err) {
+              clearInterval(interval);
+              reject(err);
+            }
+          }, 2000);
+        });
+      }
+
       async function backfillMassiveForPortfolio({ failedOnly = false } = {}) {
         requirePortfolio();
-        const body = { end: $("asofDate").value || todayIso(), lookback: 250, timeout_seconds: 8, ...(failedOnly ? { failed_only: true } : {}) };
-        setRunStatus("working", failedOnly ? "Retrying failed Massive bars" : "Loading Massive bars", failedOnly ? "Only symbols with a failed Massive attempt will be retried." : "Fetching real daily bars. This can take a moment on large portfolios.");
+        const body = { end: $("asofDate").value || todayIso(), lookback: 250, ...(failedOnly ? { failed_only: true } : {}) };
+        setRunStatus("working", failedOnly ? "Retrying failed Massive bars" : "Loading Massive bars", "Backfill job queued. Fetching real daily bars in background…");
         const payload = await api(`/portfolios/${state.portfolioId}/backfill-massive`, {
           method: "POST",
           body
         });
-        state.lastBackfill = { updated: payload.updated, end: $("asofDate").value, source: payload.source, mode: payload.mode };
-        if (!payload.updated.length) {
-          if (failedOnly && !payload.selected?.length) {
-            await refreshPortfolioState();
-            log("No failed Massive symbols were available to retry.");
-            return payload;
-          }
-          const failedText = payload.failed.length
-            ? payload.failed.slice(0, 5).map((item) => `${item.ticker} (${item.error})`).join("; ")
-            : "No bars returned.";
-          throw new Error(`Massive did not load bars. ${failedText}`);
+        const jobId = payload.job && payload.job.job_id;
+        if (!jobId) {
+          throw new Error("Backfill endpoint did not return a job_id");
         }
-        state.selectedTicker = payload.updated[0];
+        const job = await pollJobUntilDone(jobId, (j) => {
+          setRunStatus("working", "Loading Massive bars", `Running… ${j.tickers_done}/${j.tickers_total} tickers done`);
+        });
+        state.lastBackfill = { end: $("asofDate").value, source: "massive-stocks-aggregates" };
         await refreshPortfolioState();
-        const failedText = payload.failed.length ? ` Failed: ${payload.failed.slice(0, 5).map((item) => `${item.ticker} (${item.error})`).join("; ")}${payload.failed.length > 5 ? "..." : ""}` : "";
-        log(`Massive loaded real bars for ${payload.updated.length} ticker(s).${failedText}`);
-        return payload;
+        const failedNote = job.tickers_failed ? ` ${job.tickers_failed} ticker(s) failed.` : "";
+        log(`Massive loaded bars for ${job.tickers_done} ticker(s).${failedNote}`);
+        return job;
       }
 
       async function backfillOnlineForPortfolio() {
         requirePortfolio();
-        setRunStatus("working", "Loading online fallback bars", "Massive is unavailable or not configured. Fetching fallback chart data.");
+        setRunStatus("working", "Loading online fallback bars", "Backfill job queued. Fetching fallback chart data in background…");
         const payload = await api(`/portfolios/${state.portfolioId}/backfill-online`, {
           method: "POST",
           body: { end: $("asofDate").value || todayIso(), lookback: 250 }
         });
-        state.lastBackfill = { updated: payload.updated, end: $("asofDate").value, source: payload.source };
-        if (!payload.updated.length) {
-          const failedText = payload.failed.length
-            ? payload.failed.slice(0, 5).map((item) => `${item.ticker} (${item.error})`).join("; ")
-            : "No bars returned.";
-          throw new Error(`Online fallback did not load bars. ${failedText}`);
+        const jobId = payload.job && payload.job.job_id;
+        if (!jobId) {
+          throw new Error("Backfill endpoint did not return a job_id");
         }
-        state.selectedTicker = payload.updated[0];
+        const job = await pollJobUntilDone(jobId, (j) => {
+          setRunStatus("working", "Loading online fallback bars", `Running… ${j.tickers_done}/${j.tickers_total} tickers done`);
+        });
+        state.lastBackfill = { end: $("asofDate").value, source: "online-yahoo-chart" };
         await refreshPortfolioState();
-        const failedText = payload.failed.length ? ` Failed: ${payload.failed.slice(0, 5).map((item) => `${item.ticker} (${item.error})`).join("; ")}${payload.failed.length > 5 ? "..." : ""}` : "";
-        log(`Online fallback loaded bars for ${payload.updated.length} ticker(s).${failedText}`);
-        return payload;
+        const failedNote = job.tickers_failed ? ` ${job.tickers_failed} ticker(s) failed.` : "";
+        log(`Online fallback loaded bars for ${job.tickers_done} ticker(s).${failedNote}`);
+        return job;
       }
 
       async function loadPrimaryMarketDataForPortfolio() {

@@ -202,6 +202,21 @@ CREATE TABLE IF NOT EXISTS alert_events (
   occurred_at TEXT NOT NULL,
   payload_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS monitor_jobs (
+  job_id TEXT PRIMARY KEY,
+  portfolio_id TEXT NOT NULL REFERENCES portfolios(portfolio_id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  params_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'queued',
+  created_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  tickers_total INTEGER NOT NULL DEFAULT 0,
+  tickers_done INTEGER NOT NULL DEFAULT 0,
+  tickers_failed INTEGER NOT NULL DEFAULT 0,
+  error TEXT NOT NULL DEFAULT ''
+);
 """
 
 
@@ -417,6 +432,23 @@ def _alert_event_from_row(row: sqlite3.Row) -> dict:
         "kind": row["kind"],
         "occurred_at": datetime.fromisoformat(row["occurred_at"]),
         "payload": json.loads(row["payload_json"]),
+    }
+
+
+def _job_from_row(row: sqlite3.Row) -> dict:
+    return {
+        "job_id": _uuid(row["job_id"]),
+        "portfolio_id": _uuid(row["portfolio_id"]),
+        "kind": row["kind"],
+        "params": json.loads(row["params_json"]),
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "started_at": row["started_at"],
+        "completed_at": row["completed_at"],
+        "tickers_total": int(row["tickers_total"]),
+        "tickers_done": int(row["tickers_done"]),
+        "tickers_failed": int(row["tickers_failed"]),
+        "error": row["error"],
     }
 
 
@@ -1368,3 +1400,78 @@ class SQLiteStore:
                     (str(portfolio_id),),
                 ).fetchall()
             return tuple(_alert_event_from_row(row) for row in rows)
+
+    # ---------------------------------------------------------------
+    # Job queue
+    # ---------------------------------------------------------------
+
+    def enqueue_job(self, portfolio_id: UUID, *, kind: str, params: dict) -> dict:
+        """Create a new queued monitor job and return it as a dict."""
+        import json as _json
+        job_id = uuid4()
+        now = _utc_now_iso()
+        with self._lock:
+            with self.conn:
+                self.conn.execute(
+                    """
+                    INSERT INTO monitor_jobs(job_id, portfolio_id, kind, params_json, status, created_at)
+                    VALUES (?, ?, ?, ?, 'queued', ?)
+                    """,
+                    (str(job_id), str(portfolio_id), kind, _json.dumps(params), now),
+                )
+        return self.get_job(job_id)
+
+    def get_job(self, job_id: UUID) -> Optional[dict]:
+        """Return a job dict or None if not found."""
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM monitor_jobs WHERE job_id = ?",
+                (str(job_id),),
+            ).fetchone()
+            if row is None:
+                return None
+            return _job_from_row(row)
+
+    def dequeue_next_job(self) -> Optional[dict]:
+        """Atomically pick the oldest queued job and mark it running.
+
+        Returns the job dict (now status='running') or None if queue is empty.
+        """
+        with self._lock:
+            row = self.conn.execute(
+                "SELECT * FROM monitor_jobs WHERE status = 'queued' ORDER BY created_at LIMIT 1"
+            ).fetchone()
+            if row is None:
+                return None
+            job_id = row["job_id"]
+            now = _utc_now_iso()
+            with self.conn:
+                self.conn.execute(
+                    "UPDATE monitor_jobs SET status = 'running', started_at = ? WHERE job_id = ?",
+                    (now, job_id),
+                )
+            return self.get_job(UUID(job_id))
+
+    def finish_job(
+        self,
+        job_id: UUID,
+        *,
+        status: str,
+        tickers_total: int = 0,
+        tickers_done: int = 0,
+        tickers_failed: int = 0,
+        error: str = "",
+    ) -> None:
+        """Mark a job done or failed with final counts."""
+        now = _utc_now_iso()
+        with self._lock:
+            with self.conn:
+                self.conn.execute(
+                    """
+                    UPDATE monitor_jobs
+                    SET status = ?, completed_at = ?,
+                        tickers_total = ?, tickers_done = ?, tickers_failed = ?, error = ?
+                    WHERE job_id = ?
+                    """,
+                    (status, now, tickers_total, tickers_done, tickers_failed, error, str(job_id)),
+                )

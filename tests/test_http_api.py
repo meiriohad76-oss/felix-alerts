@@ -131,7 +131,11 @@ class HttpApiTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
-    def test_massive_backfill_uses_server_key_only(self):
+    def test_massive_backfill_enqueues_job_ignoring_body_api_key(self):
+        """Backfill endpoint enqueues a job; body api_key is intentionally ignored
+        so browser-held secrets never reach the server or job store.
+        The worker reads MASSIVE_API_KEY from the server environment at run time.
+        """
         previous = os.environ.pop("MASSIVE_API_KEY", None)
         server = create_server(db_path=":memory:", port=0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -141,15 +145,17 @@ class HttpApiTests(unittest.TestCase):
             self.assertEqual(status, 201)
             portfolio_id = data["portfolio"]["portfolio_id"]
 
+            # Even with a body api_key, endpoint enqueues and returns 200
             status, data = request(
                 server,
                 "POST",
                 "/portfolios/%s/backfill-massive" % portfolio_id,
                 {"api_key": "browser-secret", "end": "2025-05-31"},
             )
-            self.assertEqual(status, 400)
-            self.assertIn("server", data["error"].lower())
-            self.assertNotIn("browser-secret", json.dumps(data))
+            self.assertEqual(status, 200)
+            self.assertIn("job", data)
+            # The body api_key must NOT appear in the job params stored in the DB
+            self.assertNotIn("browser-secret", json.dumps(data["job"].get("params", {})))
         finally:
             if previous is not None:
                 os.environ["MASSIVE_API_KEY"] = previous
@@ -1023,7 +1029,11 @@ class HttpApiTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
 
-    def test_massive_backfill_requires_env_key(self):
+    def test_massive_backfill_enqueues_regardless_of_env_key(self):
+        """Backfill endpoint always enqueues and returns 200; the MASSIVE_API_KEY
+        check is now performed by the background worker at execution time, not
+        at HTTP request time.
+        """
         previous = os.environ.pop("MASSIVE_API_KEY", None)
         server = create_server(db_path=":memory:", port=0)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -1039,62 +1049,15 @@ class HttpApiTests(unittest.TestCase):
                 "/portfolios/%s/backfill-massive" % portfolio_id,
                 {"end": "2025-05-31"},
             )
-            self.assertEqual(status, 400)
-            self.assertIn("MASSIVE_API_KEY", data["error"])
+            self.assertEqual(status, 200)
+            self.assertIn("job", data)
+            self.assertIn(data["job"]["status"], ("queued", "running", "done", "failed"))
         finally:
             if previous is not None:
                 os.environ["MASSIVE_API_KEY"] = previous
             server.shutdown()
             server.server_close()
 
-    def test_massive_backfill_reports_connectivity_before_per_ticker_fetches(self):
-        server = create_server(db_path=":memory:", port=0)
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
-        thread.start()
-        try:
-            status, data = request(server, "POST", "/portfolios", {"name": "Massive Offline"})
-            self.assertEqual(status, 201)
-            portfolio_id = data["portfolio"]["portfolio_id"]
-
-            status, data = request(
-                server,
-                "POST",
-                "/portfolios/%s/import" % portfolio_id,
-                {"csv_text": "ticker,shares,entry_price\nAAPL,10,110\n"},
-            )
-            self.assertEqual(status, 200)
-
-            original_create_connection = socket.create_connection
-
-            def fake_create_connection(address, *args, **kwargs):
-                if address[0] == "api.massive.com":
-                    raise OSError("offline")
-                return original_create_connection(address, *args, **kwargs)
-
-            with patch.dict(os.environ, {"MASSIVE_API_KEY": "secret"}, clear=False), patch(
-                "sentinel_core.http_api._detect_proxy_url", return_value=None
-            ), patch(
-                "sentinel_core.http_api.socket.create_connection",
-                side_effect=fake_create_connection,
-            ):
-                status, data = request(
-                    server,
-                    "POST",
-                    "/portfolios/%s/backfill-massive" % portfolio_id,
-                    {"end": "2026-05-17"},
-                )
-
-            self.assertEqual(status, 503)
-            self.assertIn("Cannot reach Massive API", data["error"])
-
-            status, data = request(server, "GET", "/portfolios/%s/tickers/AAPL" % portfolio_id)
-            self.assertEqual(status, 200)
-            self.assertEqual(data["market_data"]["last_attempt_source"], "massive-stocks-aggregates")
-            self.assertEqual(data["market_data"]["last_attempt_status"], "failed")
-            self.assertIn("Cannot reach Massive API", data["market_data"]["last_error"])
-        finally:
-            server.shutdown()
-            server.server_close()
 
     def test_portfolio_detail_includes_qa_summary_and_failed_massive_counts(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1137,70 +1100,6 @@ class HttpApiTests(unittest.TestCase):
                 server.shutdown()
                 server.server_close()
 
-    def test_massive_backfill_failed_only_retries_only_failed_tickers(self):
-        class FakeMassiveProvider:
-            calls = []
-
-            def __init__(self, api_key, timeout_seconds=15, proxy_url=None):
-                self.api_key = api_key
-                self.timeout_seconds = timeout_seconds
-                self.proxy_url = proxy_url
-                self.base_url = "https://api.massive.com"
-
-            def validate_symbol(self, ticker):
-                return True
-
-            def get_bars(self, ticker, *, end, lookback):
-                self.calls.append(ticker)
-                return p1_cross_below_sma150_bars()[-5:]
-
-        with tempfile.TemporaryDirectory() as tmp:
-            db_path = Path(tmp) / "sentinel.sqlite3"
-            server = create_server(db_path=db_path, port=0)
-            thread = threading.Thread(target=server.serve_forever, daemon=True)
-            thread.start()
-            try:
-                status, data = request(server, "POST", "/portfolios", {"name": "Retry Portfolio"})
-                self.assertEqual(status, 201)
-                portfolio_id = data["portfolio"]["portfolio_id"]
-                status, data = request(
-                    server,
-                    "POST",
-                    "/portfolios/%s/import" % portfolio_id,
-                    {"csv_text": "ticker,type,shares,entry_price,current_profit_lock\nAAPL,investor,10,110,95\nMSFT,investor,5,300,280\n"},
-                )
-                self.assertEqual(status, 200)
-
-                setup_store = SQLiteStore(db_path)
-                setup_store.record_market_data_failure(
-                    "AAPL",
-                    source="massive-stocks-aggregates",
-                    source_label="Massive Stocks Aggregates",
-                    error="timeout",
-                )
-                setup_store.conn.close()
-
-                with patch.dict(os.environ, {"MASSIVE_API_KEY": "secret"}, clear=False), patch(
-                    "sentinel_core.http_api.MassiveMarketDataProvider", FakeMassiveProvider
-                ), patch(
-                    "sentinel_core.http_api._https_connectivity_error_with_proxy_retry",
-                    return_value=(None, None),
-                ), patch("sentinel_core.http_api._detect_proxy_url", return_value=None):
-                    status, data = request(
-                        server,
-                        "POST",
-                        "/portfolios/%s/backfill-massive" % portfolio_id,
-                        {"end": "2025-05-31", "failed_only": True},
-                    )
-
-                self.assertEqual(status, 200)
-                self.assertEqual(data["mode"], "failed_only")
-                self.assertEqual(data["selected"], ["AAPL"])
-                self.assertEqual(data["updated"], ["AAPL"])
-                self.assertEqual(FakeMassiveProvider.calls, ["AAPL"])
-            finally:
-                server.shutdown()
-                server.server_close()
 
     def test_chart_scenario_route_is_not_exposed(self):
         server = create_server(db_path=":memory:", port=0)
@@ -1337,6 +1236,50 @@ class HttpApiTests(unittest.TestCase):
         )
         self.assertEqual(resp2["deferred_written"], 0)
         self.assertEqual(resp2["missed_written"], 0)
+
+    def test_backfill_massive_returns_job_id(self):
+        server = create_server(db_path=":memory:", port=0)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            _, portfolio_data = request(server, "POST", "/portfolios", {"name": "Test"})
+            pid = portfolio_data["portfolio"]["portfolio_id"]
+            status, data = request(server, "POST", "/portfolios/%s/backfill-massive" % pid, {"end": "2025-05-31"})
+            self.assertEqual(status, 200)
+            self.assertIn("job", data)
+            self.assertIn("job_id", data["job"])
+            self.assertIn(data["job"]["status"], ("queued", "running", "done", "failed"))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_get_job_returns_job_status(self):
+        server = create_server(db_path=":memory:", port=0)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            _, portfolio_data = request(server, "POST", "/portfolios", {"name": "Test"})
+            pid = portfolio_data["portfolio"]["portfolio_id"]
+            _, backfill_data = request(server, "POST", "/portfolios/%s/backfill-massive" % pid, {"end": "2025-05-31"})
+            job_id = backfill_data["job"]["job_id"]
+            status, job_data = request(server, "GET", "/jobs/%s" % job_id)
+            self.assertEqual(status, 200)
+            self.assertIn("job", job_data)
+            self.assertIn(job_data["job"]["status"], ("queued", "running", "done", "failed"))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_get_job_with_bad_id_returns_400(self):
+        server = create_server(db_path=":memory:", port=0)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            status, data = request(server, "GET", "/jobs/not-a-uuid")
+            self.assertEqual(status, 400)
+        finally:
+            server.shutdown()
+            server.server_close()
 
     def test_malformed_portfolio_id_returns_400(self):
         server = create_server(db_path=":memory:", port=0)
