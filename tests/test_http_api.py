@@ -1338,6 +1338,37 @@ class HttpApiTests(unittest.TestCase):
         self.assertEqual(resp2["deferred_written"], 0)
         self.assertEqual(resp2["missed_written"], 0)
 
+    def test_malformed_portfolio_id_returns_400(self):
+        server = create_server(db_path=":memory:", port=0)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            status, data = request(server, "GET", "/portfolios/not-a-uuid")
+            self.assertEqual(status, 400)
+            self.assertIn("portfolio_id", data.get("error", ""))
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_malformed_alert_id_returns_400(self):
+        server = create_server(db_path=":memory:", port=0)
+        t = threading.Thread(target=server.serve_forever, daemon=True)
+        t.start()
+        try:
+            _, portfolio_data = request(server, "POST", "/portfolios", {"name": "Test"})
+            pid = portfolio_data["portfolio"]["portfolio_id"]
+            status, data = request(
+                server,
+                "POST",
+                "/portfolios/%s/alerts/not-a-uuid/ack" % pid,
+                {"ack_kind": "placed"},
+            )
+            self.assertEqual(status, 400)
+            self.assertIn("alert_id", data.get("error", ""))
+        finally:
+            server.shutdown()
+            server.server_close()
+
 
 if __name__ == "__main__":
     unittest.main()

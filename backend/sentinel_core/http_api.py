@@ -110,6 +110,21 @@ def _parse_limited_int(
     return parsed
 
 
+def _parse_uuid(value: str, field_name: str) -> "UUID":
+    """Parse a UUID string, raising ApiError 400 on invalid input.
+
+    Use this for all route, query, and body UUID parameters instead of
+    calling UUID() directly — UUID() raises ValueError which maps to 500.
+    """
+    try:
+        return UUID(str(value))
+    except (ValueError, AttributeError) as exc:
+        raise ApiError(
+            HTTPStatus.BAD_REQUEST,
+            "Invalid %s: must be a valid UUID" % field_name,
+        ) from exc
+
+
 class SentinelApi:
     def __init__(self, workspace: PersistentSentinelWorkspace) -> None:
         self.workspace = workspace
@@ -124,70 +139,70 @@ class SentinelApi:
         if method == "POST" and path == "/portfolios":
             return HTTPStatus.CREATED, self.create_portfolio(body)
         if method == "GET" and path == "/portfolios":
-            user_id = UUID(query.get("user_id", [str(DEFAULT_USER_ID)])[0])
+            user_id = _parse_uuid(query.get("user_id", [str(DEFAULT_USER_ID)])[0], "user_id")
             return HTTPStatus.OK, {"portfolios": self.workspace.store.list_portfolios(user_id)}
 
         match = re.fullmatch(r"/portfolios/([^/]+)", path)
         if method == "GET" and match:
-            return HTTPStatus.OK, self.portfolio_detail(UUID(match.group(1)))
+            return HTTPStatus.OK, self.portfolio_detail(_parse_uuid(match.group(1), "portfolio_id"))
 
         match = re.fullmatch(r"/portfolios/([^/]+)/preview", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.preview_csv(UUID(match.group(1)), body)
+            return HTTPStatus.OK, self.preview_csv(_parse_uuid(match.group(1), "portfolio_id"), body)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/import", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.import_csv(UUID(match.group(1)), body)
+            return HTTPStatus.OK, self.import_csv(_parse_uuid(match.group(1), "portfolio_id"), body)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/tickers/([^/]+)", path)
         if method == "GET" and match:
-            return HTTPStatus.OK, self.ticker_detail(UUID(match.group(1)), unquote(match.group(2)))
+            return HTTPStatus.OK, self.ticker_detail(_parse_uuid(match.group(1), "portfolio_id"), unquote(match.group(2)))
 
         match = re.fullmatch(r"/portfolios/([^/]+)/tickers/([^/]+)/classify", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.classify_ticker(UUID(match.group(1)), unquote(match.group(2)), body)
+            return HTTPStatus.OK, self.classify_ticker(_parse_uuid(match.group(1), "portfolio_id"), unquote(match.group(2)), body)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/tickers/([^/]+)/setup-data", path)
         if method == "POST" and match:
             return HTTPStatus.OK, self.update_ticker_setup_data(
-                UUID(match.group(1)),
+                _parse_uuid(match.group(1), "portfolio_id"),
                 unquote(match.group(2)),
                 body,
             )
 
         match = re.fullmatch(r"/portfolios/([^/]+)/tickers/classify-unknown", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.classify_unknown_tickers(UUID(match.group(1)), body)
+            return HTTPStatus.OK, self.classify_unknown_tickers(_parse_uuid(match.group(1), "portfolio_id"), body)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/backfill-online", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.backfill_online(UUID(match.group(1)), body)
+            return HTTPStatus.OK, self.backfill_online(_parse_uuid(match.group(1), "portfolio_id"), body)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/backfill-massive", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.backfill_massive(UUID(match.group(1)), body)
+            return HTTPStatus.OK, self.backfill_massive(_parse_uuid(match.group(1), "portfolio_id"), body)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/evaluate", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.evaluate(UUID(match.group(1)), body)
+            return HTTPStatus.OK, self.evaluate(_parse_uuid(match.group(1), "portfolio_id"), body)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/runs/latest", path)
         if method == "GET" and match:
-            run = self.workspace.store.latest_monitor_run(UUID(match.group(1)))
+            run = self.workspace.store.latest_monitor_run(_parse_uuid(match.group(1), "portfolio_id"))
             return HTTPStatus.OK, {"run": run}
 
         match = re.fullmatch(r"/portfolios/([^/]+)/runs", path)
         if method == "GET" and match:
-            return HTTPStatus.OK, {"runs": self.workspace.store.list_monitor_runs(UUID(match.group(1)))}
+            return HTTPStatus.OK, {"runs": self.workspace.store.list_monitor_runs(_parse_uuid(match.group(1), "portfolio_id"))}
 
         match = re.fullmatch(r"/portfolios/([^/]+)/alerts", path)
         if method == "GET" and match:
-            portfolio_id = UUID(match.group(1))
+            portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
             return HTTPStatus.OK, {"alerts": self.workspace.list_alerts(portfolio_id=portfolio_id)}
 
         match = re.fullmatch(r"/portfolios/([^/]+)/alert-events", path)
         if method == "GET" and match:
-            portfolio_id = UUID(match.group(1))
+            portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
             ticker = query.get("ticker", [""])[0].strip().upper() or None
             return HTTPStatus.OK, {
                 "events": self.workspace.store.list_alert_events(portfolio_id, ticker=ticker)
@@ -195,39 +210,43 @@ class SentinelApi:
 
         match = re.fullmatch(r"/portfolios/([^/]+)/notification-settings", path)
         if method == "GET" and match:
-            return HTTPStatus.OK, self.notification_settings(UUID(match.group(1)))
+            return HTTPStatus.OK, self.notification_settings(_parse_uuid(match.group(1), "portfolio_id"))
         if method == "POST" and match:
-            return HTTPStatus.OK, self.save_notification_settings(UUID(match.group(1)), body)
+            return HTTPStatus.OK, self.save_notification_settings(_parse_uuid(match.group(1), "portfolio_id"), body)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/notification-settings/test", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.test_notification_settings(UUID(match.group(1)))
+            return HTTPStatus.OK, self.test_notification_settings(_parse_uuid(match.group(1), "portfolio_id"))
 
         match = re.fullmatch(r"/portfolios/([^/]+)/notifications", path)
         if method == "GET" and match:
-            portfolio_id = UUID(match.group(1))
+            portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
             return HTTPStatus.OK, {
                 "notifications": self.workspace.list_notifications(portfolio_id=portfolio_id)
             }
 
         match = re.fullmatch(r"/portfolios/([^/]+)/alerts/([^/]+)/ack", path)
         if method == "POST" and match:
-            return HTTPStatus.OK, self.acknowledge(UUID(match.group(1)), UUID(match.group(2)), body)
+            return HTTPStatus.OK, self.acknowledge(
+                _parse_uuid(match.group(1), "portfolio_id"),
+                _parse_uuid(match.group(2), "alert_id"),
+                body,
+            )
 
         match = re.fullmatch(r"/portfolios/([^/]+)/maintenance/scorecard", path)
         if method == "POST" and match:
-            portfolio_id = UUID(match.group(1))
+            portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
             return HTTPStatus.OK, self.maintenance_scorecard(portfolio_id)
 
         match = re.fullmatch(r"/portfolios/([^/]+)/report", path)
         if method == "GET" and match:
-            portfolio_id = UUID(match.group(1))
+            portfolio_id = _parse_uuid(match.group(1), "portfolio_id")
             return HTTPStatus.OK, {"report": self.workspace.build_report(portfolio_id=portfolio_id)}
 
         raise ApiError(HTTPStatus.NOT_FOUND, "No route for %s %s" % (method, path))
 
     def create_portfolio(self, body: dict) -> dict:
-        user_id = UUID(body.get("user_id", str(DEFAULT_USER_ID)))
+        user_id = _parse_uuid(body.get("user_id", str(DEFAULT_USER_ID)), "user_id")
         name = body.get("name") or "Portfolio"
         portfolio = self.workspace.create_portfolio(user_id=user_id, name=name)
         return {"portfolio": portfolio}
@@ -499,7 +518,7 @@ class SentinelApi:
         }
 
     def preview_csv(self, portfolio_id: UUID, body: dict) -> dict:
-        user_id = UUID(body.get("user_id", str(DEFAULT_USER_ID)))
+        user_id = _parse_uuid(body.get("user_id", str(DEFAULT_USER_ID)), "user_id")
         csv_text = body.get("csv_text")
         if not csv_text:
             raise ApiError(HTTPStatus.BAD_REQUEST, "csv_text is required")
@@ -512,7 +531,7 @@ class SentinelApi:
         return {"import_report": report}
 
     def import_csv(self, portfolio_id: UUID, body: dict) -> dict:
-        user_id = UUID(body.get("user_id", str(DEFAULT_USER_ID)))
+        user_id = _parse_uuid(body.get("user_id", str(DEFAULT_USER_ID)), "user_id")
         csv_text = body.get("csv_text")
         if not csv_text:
             raise ApiError(HTTPStatus.BAD_REQUEST, "csv_text is required")
