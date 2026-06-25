@@ -1,12 +1,12 @@
 # Sentinel Operational Runbook
 
-Last updated: 2026-06-23
+Last updated: 2026-06-25
 
 ## Current Source State
 
 - Branch: `main`
-- HEAD commit: `63f8bcf2eac5a27c6d61b6907105758e569a5916` (update to current after each deployment)
-- Test suite: 179 tests passed, 1 skipped (as of 2026-06-23; count grows with new features)
+- HEAD commit: `717f9b9` (update to current after each deployment)
+- Test suite: 184 tests passed, 1 skipped (as of 2026-06-25; count grows with new features)
 
 ## Running Locally
 
@@ -109,7 +109,7 @@ sudo /opt/sentinel/deploy/raspberry-pi/restore_database.sh \
 
 - **Browser UX test skipped locally**: Chrome is not installed. Set `CHROME_BIN` to the Chrome executable path to enable the CDP browser test in `tests/test_browser_sidebar_ux.py`.
 - **Python 3.14 deprecation warnings**: `datetime.utcnow()` emits warnings under Python 3.14. The Pi runs Python 3.13.5 so this is not an immediate risk.
-- **Backfill is synchronous** (as of 2026-06-23; async job queue is planned).
+- **Backfill is async** via `monitor_jobs` SQLite queue. `POST /portfolios/{id}/backfill-massive` and `/backfill-online` return `{job_id}` immediately; poll `GET /jobs/{id}` for status. Evaluate (`POST /portfolios/{id}/evaluate`) remains synchronous.
 
 ## Open Product Decisions
 

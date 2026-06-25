@@ -28,7 +28,6 @@ from .market_data import (
 from .notifications import EmailMessage
 from .persistent_service import PersistentSentinelWorkspace
 from .rule_catalog import get_rule
-from .scorecard import stale_exit_events
 from .serialization import to_jsonable
 from .sqlite_store import SQLiteStore
 from .subscriptions import applicable_rule_ids
@@ -335,28 +334,6 @@ class SentinelApi:
                 "error": "Enable email or Telegram alerts before sending a test notification.",
             })
         return {"results": tuple(results), "delivery_status": self.notification_delivery_status()}
-
-    def maintenance_scorecard(self, portfolio_id: UUID) -> dict:
-        """Sweep open exit alerts and write deferred/missed scorecard events.
-
-        Idempotent: safe to call from a daily cron job on the Pi.
-        Returns counts of newly written events only (not skipped duplicates).
-        """
-        open_exit_alerts = [
-            a for a in self.workspace.store.list_alerts(portfolio_id)
-            if a.status in {"new", "sent"} and a.result.kind == "exit"
-        ]
-        events = stale_exit_events(open_exit_alerts)
-        deferred_written = 0
-        missed_written = 0
-        for event in events:
-            written = self.workspace.store.save_scorecard_event_if_not_exists(event)
-            if written:
-                if event.kind == "deferred":
-                    deferred_written += 1
-                elif event.kind == "missed":
-                    missed_written += 1
-        return {"deferred_written": deferred_written, "missed_written": missed_written}
 
     def market_data_config(self) -> dict:
         massive_configured = bool(os.environ.get("MASSIVE_API_KEY", "").strip())
@@ -1481,6 +1458,11 @@ def _execute_job(api: SentinelApi, job: dict) -> None:
     try:
         if kind == "backfill_massive":
             api_key = os.environ.get("MASSIVE_API_KEY", "").strip()
+            if not api_key:
+                raise ValueError(
+                    "MASSIVE_API_KEY is not configured on the server. "
+                    "Set the environment variable before running Massive backfill."
+                )
             lookback = int(params.get("lookback", 250))
             end = date.fromisoformat(params.get("end", date.today().isoformat()))
             provider = MassiveMarketDataProvider(api_key=api_key)
@@ -1501,7 +1483,7 @@ def _execute_job(api: SentinelApi, job: dict) -> None:
                         ticker.ticker,
                         source="massive-stocks-aggregates",
                         source_label="Massive Stocks Aggregates",
-                        error=str(exc),
+                        error=_redact_secret(str(exc), api_key),
                     )
                     tickers_failed += 1
 
@@ -1530,12 +1512,8 @@ def _execute_job(api: SentinelApi, job: dict) -> None:
                     )
                     tickers_failed += 1
 
-        elif kind == "evaluate":
-            asof = date.fromisoformat(params.get("asof", date.today().isoformat()))
-            api.workspace.evaluate_portfolio(portfolio_id=portfolio_id, asof=asof)
-            tickers = api.workspace.store.list_tickers(portfolio_id, include_inactive=False)
-            tickers_total = len(tickers)
-            tickers_done = tickers_total
+        else:
+            raise ValueError("Unknown job kind: %s" % kind)
 
         api.workspace.store.finish_job(
             job_id,
